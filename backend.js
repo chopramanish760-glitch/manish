@@ -673,31 +673,60 @@ async function sendOTP(phone, email, code) {
     
     if (FAST2SMS_API_KEY) {
       try {
-        // Fast2SMS API endpoint (uses GET with query parameters)
-        const phoneNumber = phone.replace(/[^0-9]/g, ""); // Remove non-digits, keep only numbers
-        const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(FAST2SMS_API_KEY)}&variables_values=${code}&route=otp&numbers=${phoneNumber}`;
+        // Format phone number (ensure it's just digits, add 91 if Indian number missing country code)
+        let phoneNumber = phone.replace(/[^0-9]/g, ""); // Remove non-digits
+        
+        // If number is 10 digits, assume Indian number and add country code 91
+        if (phoneNumber.length === 10) {
+          phoneNumber = "91" + phoneNumber;
+        }
+        
+        // Fast2SMS API - Using GET method with authorization header
+        const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(FAST2SMS_API_KEY)}&route=otp&variables_values=${encodeURIComponent(code)}&numbers=${phoneNumber}`;
+        
+        console.log(`📤 Attempting to send OTP via Fast2SMS to: ${masked} (${phoneNumber.length} digits)`);
         
         const response = await fetch(url, {
           method: "GET",
           headers: {
+            "authorization": FAST2SMS_API_KEY,
             "Content-Type": "application/json"
           }
         });
         
-        const result = await response.json();
+        const responseText = await response.text();
+        let result;
         
-        if (result.return === true) {
+        try {
+          result = JSON.parse(responseText);
+        } catch (parseError) {
+          console.error(`❌ Fast2SMS API returned invalid JSON: ${responseText}`);
+          console.log(`📱 OTP sent to ${masked}: ${code} (API response error, check logs)`);
+          return { phone: masked, email: null, sent: false };
+        }
+        
+        console.log(`📥 Fast2SMS API Response: ${JSON.stringify(result)}`);
+        
+        if (result.return === true || result.return === "true") {
           console.log(`✅ OTP SMS sent successfully to ${masked} via Fast2SMS`);
           console.log(`   Request ID: ${result.request_id || 'N/A'}`);
+          if (result.message && Array.isArray(result.message)) {
+            console.log(`   Message: ${result.message.join(', ')}`);
+          }
           return { phone: masked, email: null, sent: true };
         } else {
           console.error(`❌ Fast2SMS error: ${JSON.stringify(result)}`);
+          console.error(`   Full response: ${responseText}`);
+          if (result.message) {
+            console.error(`   Error message: ${Array.isArray(result.message) ? result.message.join(', ') : result.message}`);
+          }
           // Fallback to console log if SMS fails
           console.log(`📱 OTP sent to ${masked}: ${code} (SMS service unavailable, check logs)`);
           return { phone: masked, email: null, sent: false };
         }
       } catch (error) {
         console.error(`❌ Error sending SMS via Fast2SMS: ${error.message}`);
+        console.error(`   Error stack: ${error.stack}`);
         // Fallback to console log if SMS fails
         console.log(`📱 OTP sent to ${masked}: ${code} (SMS service error, check logs)`);
         return { phone: masked, email: null, sent: false };
@@ -807,9 +836,10 @@ app.post("/api/otp/request-reset", async (req, res) => {
     
     return res.json({ 
       ok: true, 
-      message: "OTP sent successfully",
+      message: sendResult.sent ? "OTP sent successfully via SMS" : "OTP generated (check backend logs for SMS status)",
       maskedPhone: sendResult.phone || null,
-      email: user.email ? user.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null
+      email: user.email ? user.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null,
+      smsSent: sendResult.sent || false
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
