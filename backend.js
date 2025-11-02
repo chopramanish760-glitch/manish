@@ -292,6 +292,9 @@ async function initializeApp() {
   
   // Start checking for event live notifications every minute
   setInterval(checkEventLiveNotifications, 60000);
+  
+  // Start checking for completed events to send feedback notifications every minute
+  setInterval(checkCompletedEventsForFeedback, 60000);
 }
 
 // Internal Keep-Alive Mechanism - Prevents backend from sleeping
@@ -430,6 +433,58 @@ async function checkEventLiveNotifications() {
     }
   } catch (error) {
     console.error('Error checking event live notifications:', error);
+  }
+}
+
+// Check for completed events and send feedback notifications to booked users
+async function checkCompletedEventsForFeedback() {
+  try {
+    const data = await loadData();
+    const now = new Date();
+    
+    if (!data.feedbacks) data.feedbacks = [];
+    
+    for (const event of data.events) {
+      const eventStart = new Date(`${event.date}T${event.time}`);
+      const eventEnd = new Date(eventStart.getTime() + (event.duration || 0) * 60000);
+      
+      // Check if event just completed (within the last 10 minutes)
+      const timeSinceEnd = now.getTime() - eventEnd.getTime();
+      const tenMinutes = 10 * 60 * 1000;
+      
+      if (timeSinceEnd >= 0 && timeSinceEnd <= tenMinutes && event.bookings && event.bookings.length > 0) {
+        // Check if we already sent feedback notifications for this event
+        const feedbackNotificationKey = `feedback_notified_${event.id}`;
+        if (!data.eventNotifications) data.eventNotifications = {};
+        
+        if (!data.eventNotifications[feedbackNotificationKey]) {
+          // Send feedback request notifications to all booked users
+          for (const booking of event.bookings) {
+            if (!data.notifications[booking.regNumber]) {
+              data.notifications[booking.regNumber] = [];
+            }
+            
+            const notificationMsg = `📝 "${event.title}" has completed! Please share your feedback.`;
+            data.notifications[booking.regNumber].unshift({
+              msg: notificationMsg,
+              time: now.toISOString(),
+              read: false,
+              type: 'feedback',
+              eventId: event.id,
+              eventTitle: event.title
+            });
+          }
+          
+          // Mark that we've sent feedback notifications for this event
+          data.eventNotifications[feedbackNotificationKey] = true;
+          await saveData(data);
+          
+          console.log(`📝 Sent feedback request notifications to ${event.bookings.length} booked users for event: ${event.title}`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error checking completed events for feedback:', error);
   }
 }
 
@@ -2235,4 +2290,157 @@ app.post('/api/account/delete', async (req, res) => {
 
   await saveData(data);
   return res.json({ ok: true });
+});
+
+// ---------- Event Feedback System ----------
+// Submit feedback for a completed event
+// Body: { eventId, regNumber, seatCapacityRating, review }
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { eventId, regNumber, seatCapacityRating, review } = req.body;
+    
+    if (!eventId || !regNumber || seatCapacityRating === undefined || !review) {
+      return res.status(400).json({ ok: false, error: 'All fields are required.' });
+    }
+    
+    // Validate seatCapacityRating (should be 2 or 3)
+    if (seatCapacityRating !== 2 && seatCapacityRating !== 3) {
+      return res.status(400).json({ ok: false, error: 'Seat capacity rating must be 2 or 3.' });
+    }
+    
+    // Check if event exists and user was booked
+    const event = data.events.find(e => e.id === Number(eventId));
+    if (!event) {
+      return res.status(404).json({ ok: false, error: 'Event not found.' });
+    }
+    
+    const wasBooked = event.bookings && event.bookings.some(b => b.regNumber === regNumber);
+    if (!wasBooked) {
+      return res.status(403).json({ ok: false, error: 'You must have booked a ticket to provide feedback.' });
+    }
+    
+    // Check if feedback already exists (prevent duplicate/change)
+    if (!data.feedbacks) data.feedbacks = [];
+    const existingFeedback = data.feedbacks.find(f => f.eventId === Number(eventId) && f.regNumber === regNumber);
+    
+    if (existingFeedback) {
+      return res.status(400).json({ ok: false, error: 'Feedback already submitted. Cannot change or resubmit.' });
+    }
+    
+    // Create feedback entry
+    const feedback = {
+      id: Date.now(),
+      eventId: Number(eventId),
+      regNumber,
+      seatCapacityRating: Number(seatCapacityRating),
+      review: String(review).trim(),
+      submittedAt: new Date().toISOString()
+    };
+    
+    data.feedbacks.push(feedback);
+    await saveData(data);
+    
+    console.log(`📝 Feedback submitted for event ${eventId} by ${regNumber}`);
+    res.json({ ok: true, feedback });
+  } catch (err) {
+    console.error('❌ Feedback submission error:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Get feedback list for an event (organizer only)
+// Query: ?organizerReg=<regNumber>
+app.get('/api/feedback/:eventId', async (req, res) => {
+  try {
+    const data = await loadData();
+    const eventId = Number(req.params.eventId);
+    const organizerReg = req.query.organizerReg;
+    
+    const event = data.events.find(e => e.id === eventId);
+    if (!event) {
+      return res.status(404).json({ ok: false, error: 'Event not found.' });
+    }
+    
+    // Check if user is organizer
+    if (event.creatorRegNumber !== organizerReg) {
+      return res.status(403).json({ ok: false, error: 'Only the organizer can view feedback.' });
+    }
+    
+    if (!data.feedbacks) data.feedbacks = [];
+    const eventFeedbacks = data.feedbacks.filter(f => f.eventId === eventId);
+    
+    // Enrich with user information
+    const feedbacksWithUsers = eventFeedbacks.map(f => {
+      const user = data.users.find(u => u.regNumber === f.regNumber);
+      return {
+        ...f,
+        userName: user ? `${user.name || ''} ${user.surname || ''}`.trim() || f.regNumber : f.regNumber,
+        userRegNumber: f.regNumber
+      };
+    });
+    
+    res.json({ ok: true, feedbacks: feedbacksWithUsers });
+  } catch (err) {
+    console.error('❌ Get feedback list error:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Get individual student feedback (organizer only)
+// Query: ?organizerReg=<regNumber>
+app.get('/api/feedback/:eventId/:regNumber', async (req, res) => {
+  try {
+    const data = await loadData();
+    const eventId = Number(req.params.eventId);
+    const regNumber = req.params.regNumber;
+    const organizerReg = req.query.organizerReg;
+    
+    const event = data.events.find(e => e.id === eventId);
+    if (!event) {
+      return res.status(404).json({ ok: false, error: 'Event not found.' });
+    }
+    
+    // Check if user is organizer
+    if (event.creatorRegNumber !== organizerReg) {
+      return res.status(403).json({ ok: false, error: 'Only the organizer can view feedback.' });
+    }
+    
+    if (!data.feedbacks) data.feedbacks = [];
+    const feedback = data.feedbacks.find(f => f.eventId === eventId && f.regNumber === regNumber);
+    
+    if (!feedback) {
+      return res.status(404).json({ ok: false, error: 'Feedback not found.' });
+    }
+    
+    // Enrich with user information
+    const user = data.users.find(u => u.regNumber === regNumber);
+    const feedbackWithUser = {
+      ...feedback,
+      userName: user ? `${user.name || ''} ${user.surname || ''}`.trim() || regNumber : regNumber,
+      userRegNumber: regNumber
+    };
+    
+    res.json({ ok: true, feedback: feedbackWithUser });
+  } catch (err) {
+    console.error('❌ Get individual feedback error:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Check if user has already submitted feedback for an event
+app.get('/api/feedback/check/:eventId/:regNumber', async (req, res) => {
+  try {
+    const data = await loadData();
+    const eventId = Number(req.params.eventId);
+    const regNumber = req.params.regNumber;
+    
+    if (!data.feedbacks) data.feedbacks = [];
+    const existingFeedback = data.feedbacks.find(f => f.eventId === eventId && f.regNumber === regNumber);
+    
+    res.json({ ok: true, submitted: !!existingFeedback, feedback: existingFeedback || null });
+  } catch (err) {
+    console.error('❌ Check feedback error:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
