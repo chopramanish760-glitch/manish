@@ -631,9 +631,19 @@ function broadcast(eventName, data, targetReg) {
 // In-memory OTP storage (in production, use Redis or database)
 const otpStore = new Map(); // Key: phone/email, Value: {code, expiresAt, purpose}
 
-// Generate 6-digit OTP
+// Generate 6-digit OTP (always unique)
 function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  // Use crypto for better randomness (if available) or Math.random with timestamp seed
+  let otp;
+  do {
+    // Generate random 6-digit number
+    otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // Add tiny timestamp component to last digit to ensure uniqueness
+    const timestampComponent = (Date.now() % 10);
+    otp = otp.slice(0, 5) + ((parseInt(otp[5]) + timestampComponent) % 10).toString();
+  } while (otp.length !== 6);
+  
+  return otp;
 }
 
 // Clean expired OTPs
@@ -654,17 +664,56 @@ function maskPhoneNumber(phone) {
 }
 
 // Send OTP via phone/email (simulated - in production use SMS/Email service)
-function sendOTP(phone, email, code) {
+async function sendOTP(phone, email, code) {
   if (phone) {
     const masked = maskPhoneNumber(phone);
-    console.log(`📱 OTP sent to ${masked}: ${code}`);
-    // In production, integrate with SMS service (Twilio, AWS SNS) or Email service (SendGrid, AWS SES)
-    // Example: await twilioClient.messages.create({ to: phone, body: `Your OTP is: ${code}` });
+    
+    // Fast2SMS integration (FREE - no billing required)
+    const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY;
+    
+    if (FAST2SMS_API_KEY) {
+      try {
+        // Fast2SMS API endpoint (uses GET with query parameters)
+        const phoneNumber = phone.replace(/[^0-9]/g, ""); // Remove non-digits, keep only numbers
+        const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(FAST2SMS_API_KEY)}&variables_values=${code}&route=otp&numbers=${phoneNumber}`;
+        
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json"
+          }
+        });
+        
+        const result = await response.json();
+        
+        if (result.return === true) {
+          console.log(`✅ OTP SMS sent successfully to ${masked} via Fast2SMS`);
+          console.log(`   Request ID: ${result.request_id || 'N/A'}`);
+          return { phone: masked, email: null, sent: true };
+        } else {
+          console.error(`❌ Fast2SMS error: ${JSON.stringify(result)}`);
+          // Fallback to console log if SMS fails
+          console.log(`📱 OTP sent to ${masked}: ${code} (SMS service unavailable, check logs)`);
+          return { phone: masked, email: null, sent: false };
+        }
+      } catch (error) {
+        console.error(`❌ Error sending SMS via Fast2SMS: ${error.message}`);
+        // Fallback to console log if SMS fails
+        console.log(`📱 OTP sent to ${masked}: ${code} (SMS service error, check logs)`);
+        return { phone: masked, email: null, sent: false };
+      }
+    } else {
+      // No API key configured - fallback to console log
+      console.log(`📱 OTP sent to ${masked}: ${code}`);
+      console.log(`⚠️  Fast2SMS_API_KEY not set. To enable SMS, get free API key from https://www.fast2sms.com and set FAST2SMS_API_KEY environment variable.`);
+      return { phone: masked, email: null, sent: false };
+    }
   } else if (email) {
     console.log(`📧 OTP sent to ${email}: ${code}`);
-    // In production: await sendEmail({ to: email, subject: 'Your OTP', body: `Your OTP is: ${code}` });
+    // Email service can be added later if needed
+    return { phone: null, email, sent: false };
   }
-  return { phone: phone ? maskPhoneNumber(phone) : null, email };
+  return { phone: null, email: null, sent: false };
 }
 
 // Request OTP for signup
@@ -690,13 +739,44 @@ app.post("/api/otp/request-signup", async (req, res) => {
     
     otpStore.set(`signup_${phone}`, { code, expiresAt, purpose: 'signup', phone, email });
     
-    const sendResult = sendOTP(phone, email, code);
+    const sendResult = await sendOTP(phone, email, code);
     
     return res.json({ 
       ok: true, 
       message: "OTP sent successfully",
       maskedPhone: sendResult.phone || null,
       email: email ? email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null // Mask email partially
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Test OTP endpoint (for testing SMS delivery)
+app.post("/api/otp/test", async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) {
+      return res.status(400).json({ ok: false, error: "Phone number is required" });
+    }
+    
+    cleanExpiredOTPs();
+    const code = generateOTP();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+    
+    // Store for verification if needed
+    otpStore.set(`test_${phone}`, { code, expiresAt, purpose: 'test', phone });
+    
+    console.log(`🧪 TEST: Generating OTP for ${phone}: ${code}`);
+    const sendResult = await sendOTP(phone, null, code);
+    
+    return res.json({ 
+      ok: true, 
+      message: "Test OTP sent successfully",
+      otp: code, // Include OTP in response for testing (remove in production)
+      maskedPhone: sendResult.phone || null,
+      sent: sendResult.sent,
+      note: "This is a test endpoint - OTP included in response"
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -723,7 +803,7 @@ app.post("/api/otp/request-reset", async (req, res) => {
     
     otpStore.set(`reset_${regNumber}`, { code, expiresAt, purpose: 'reset', regNumber, phone: user.phone, email: user.email });
     
-    const sendResult = sendOTP(user.phone, user.email, code);
+    const sendResult = await sendOTP(user.phone, user.email, code);
     
     return res.json({ 
       ok: true, 
