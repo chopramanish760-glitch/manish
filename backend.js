@@ -4,6 +4,7 @@ const multer = require("multer");
 const path = require("path");
 const { MongoClient, GridFSBucket, ObjectId } = require("mongodb");
 const cors = require("cors");
+const cloudinary = require("cloudinary").v2;
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -24,6 +25,11 @@ app.get("/", (req, res) => {
   );
 });
 app.get("/healthz", (req, res) => res.json({ ok: true }));
+// Keep-alive endpoint to prevent backend from sleeping (pinged every 2 minutes)
+app.get("/keepalive", (req, res) => {
+    console.log(`💓 Keep-alive ping at ${new Date().toISOString()}`);
+    res.json({ ok: true, timestamp: new Date().toISOString(), message: "Backend is alive" });
+});
 
 // Use persistent storage paths that survive Render.com restarts
 // For Render.com, we need to use a different approach since persistent disk isn't available on free tier
@@ -45,6 +51,32 @@ const PERSISTENT_BACKUP_DIR = (IS_RENDER && HAS_PERSISTENT_DISK) ? "/opt/render/
 const MONGODB_URI = "mongodb+srv://chopramanish760_db_user:Xg8dNsvyQ0YSYIjt@campus.urvjcdt.mongodb.net/campus_event_hub?retryWrites=true&w=majority&appName=campus";
 const DB_NAME = "campus_event_hub";
 const COLLECTION_NAME = "app_data";
+
+// Cloudinary Configuration for Media Storage
+// Support both CLOUDINARY_URL and individual environment variables
+if (process.env.CLOUDINARY_URL) {
+  // Parse CLOUDINARY_URL format: cloudinary://api_key:api_secret@cloud_name
+  cloudinary.config({ url: process.env.CLOUDINARY_URL });
+  console.log("☁️ Cloudinary configured from CLOUDINARY_URL");
+} else {
+  // Use individual environment variables or defaults
+  const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dazcrwazd";
+  const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || "149519962886185";
+  const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || "0lUh8GcUOrBQt-uOCBRGdoHIMUM";
+
+  cloudinary.config({
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: CLOUDINARY_API_SECRET,
+    secure: true
+  });
+
+  console.log("☁️ Cloudinary configured:", {
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: "***" + CLOUDINARY_API_SECRET.slice(-4)
+  });
+}
 
 let client = null;
 let db = null;
@@ -1569,65 +1601,74 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
   try {
     const data = await loadData();
     const { eventId, regNumber } = req.body;
-  if (!req.file) { return res.status(400).json({ ok: false, error: "No file uploaded." }); }
-  const event = data.events.find(e => e.id === parseInt(eventId));
-  if (!event) { return res.status(404).json({ ok: false, error: "Event not found" }); }
-  if (event.creatorRegNumber !== regNumber) { return res.status(403).json({ ok: false, error: "You are not authorized to upload media for this event." }); }
+    if (!req.file) { return res.status(400).json({ ok: false, error: "No file uploaded." }); }
+    const event = data.events.find(e => e.id === parseInt(eventId));
+    if (!event) { return res.status(404).json({ ok: false, error: "Event not found" }); }
+    if (event.creatorRegNumber !== regNumber) { return res.status(403).json({ ok: false, error: "You are not authorized to upload media for this event." }); }
     
-    // Compress media before storing
-    let processedBuffer = req.file.buffer;
-    let originalSize = req.file.buffer.length;
+    const type = req.file.mimetype.startsWith("image/") ? "photo" : "video";
+    const resourceType = type === "photo" ? "image" : "video";
     
-    try {
-      if (req.file.mimetype.startsWith('video/')) {
-        console.log(`🎬 Processing video: ${req.file.originalname} (${originalSize} bytes)`);
-        processedBuffer = await processVideo(req.file.buffer, req.file.originalname);
-        console.log(`✅ Video processed: ${originalSize} → ${processedBuffer.length} bytes`);
-      } else if (req.file.mimetype.startsWith('image/')) {
-        console.log(`🖼️ Processing image: ${req.file.originalname} (${originalSize} bytes)`);
-        processedBuffer = await processImage(req.file.buffer);
-        console.log(`✅ Image processed: ${originalSize} → ${processedBuffer.length} bytes`);
+    console.log(`☁️ Uploading ${type} to Cloudinary: ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(2)}MB)`);
+    
+    // Upload to Cloudinary
+    const uploadOptions = {
+      resource_type: resourceType,
+      folder: `campus-events/${eventId}`,
+      public_id: `media_${Date.now()}_${req.file.originalname.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9._-]/g, '')}`,
+      overwrite: false,
+      tags: [`event_${eventId}`, `uploaded_by_${regNumber}`],
+      context: {
+        eventId: eventId.toString(),
+        uploadedBy: regNumber,
+        uploadedAt: new Date().toISOString()
       }
-    } catch (compressionError) {
-      console.error('⚠️ Compression failed, using original file:', compressionError.message);
-      processedBuffer = req.file.buffer; // Use original if compression fails
+    };
+
+    // For videos, add transformation options
+    if (resourceType === 'video') {
+      uploadOptions.eager = [
+        { quality: 'auto', format: 'mp4' }
+      ];
+    } else {
+      // For images, optimize quality
+      uploadOptions.quality = 'auto';
+      uploadOptions.fetch_format = 'auto';
     }
-    
-    // Store file in GridFS with promise-based approach
-    const uploadPromise = new Promise((resolve, reject) => {
-      const uploadStream = gridFSBucket.openUploadStream(req.file.originalname, {
-        metadata: {
-          eventId: parseInt(eventId),
-          uploadedBy: regNumber,
-          uploadedAt: new Date(),
-          mimeType: req.file.mimetype
+
+    // Upload to Cloudinary - convert buffer to data URI for upload
+    const cloudinaryResult = await new Promise((resolve, reject) => {
+      // For buffer uploads, we need to convert to data URI
+      const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+      
+      cloudinary.uploader.upload(
+        dataUri,
+        uploadOptions,
+        (error, result) => {
+          if (error) {
+            console.error('❌ Cloudinary upload error:', error);
+            reject(error);
+          } else {
+            resolve(result);
+          }
         }
-      });
-      
-      uploadStream.on('error', (error) => {
-        console.error('GridFS upload error:', error);
-        reject(error);
-      });
-      
-      uploadStream.on('finish', () => {
-        resolve(uploadStream.id);
-      });
-      
-      uploadStream.end(processedBuffer);
+      );
     });
     
-    // Wait for upload to complete
-    const fileId = await uploadPromise;
-  const type = req.file.mimetype.startsWith("image/") ? "photo" : "video";
+    console.log(`✅ File uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
     
     const media = { 
       id: Date.now(),
       eventId: parseInt(eventId), 
       name: req.file.originalname, 
-      url: `/api/media/file/${fileId}`, // GridFS endpoint
+      url: cloudinaryResult.secure_url, // Cloudinary URL
+      publicId: cloudinaryResult.public_id, // Cloudinary public ID for deletion
       type,
       size: req.file.size,
-      gridFSId: fileId
+      cloudinaryId: cloudinaryResult.public_id,
+      format: cloudinaryResult.format,
+      width: cloudinaryResult.width || null,
+      height: cloudinaryResult.height || null
     };
     
     data.media.push(media); 
@@ -1642,41 +1683,61 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
       broadcast('media_changed', { reason: 'uploaded', eventId: parseInt(eventId) }); 
     } catch {}
     
-    console.log(`📁 File saved to GridFS: ${req.file.originalname} (${req.file.size} bytes)`);
+    console.log(`☁️ Media saved to Cloudinary: ${req.file.originalname}`);
     res.json({ ok: true, media });
   } catch (err) {
-    console.error('Media upload error:', err);
+    console.error('❌ Media upload error:', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 app.delete("/api/media/:mediaId", async (req, res) => {
-  const data = await loadData(); const mediaId = parseInt(req.params.mediaId); const { regNumber } = req.body;
-  const mediaIndex = data.media.findIndex(m => m.id === mediaId);
-  if (mediaIndex === -1) { return res.status(404).json({ ok: false, error: "Media not found." }); }
-  const media = data.media[mediaIndex];
-  const event = data.events.find(e => e.id === media.eventId);
-  if (event && event.creatorRegNumber !== regNumber) { return res.status(403).json({ ok: false, error: "You are not authorized to delete this media." }); }
-  
-  // Delete from GridFS if it exists
-  if (media.gridFSId) {
-    try {
-      await gridFSBucket.delete(media.gridFSId);
-      console.log(`📁 File deleted from GridFS: ${media.name}`);
-    } catch (err) {
-      console.error("Failed to delete file from GridFS:", err);
+  try {
+    const data = await loadData();
+    const mediaId = parseInt(req.params.mediaId);
+    const { regNumber } = req.body;
+    const mediaIndex = data.media.findIndex(m => m.id === mediaId);
+    if (mediaIndex === -1) { return res.status(404).json({ ok: false, error: "Media not found." }); }
+    const media = data.media[mediaIndex];
+    const event = data.events.find(e => e.id === media.eventId);
+    if (event && event.creatorRegNumber !== regNumber) { return res.status(403).json({ ok: false, error: "You are not authorized to delete this media." }); }
+    
+    // Delete from Cloudinary if it exists
+    if (media.cloudinaryId || media.publicId) {
+      try {
+        const publicId = media.cloudinaryId || media.publicId;
+        const resourceType = media.type === 'photo' ? 'image' : 'video';
+        const result = await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+        console.log(`☁️ File deleted from Cloudinary: ${media.name}`, result);
+      } catch (err) {
+        console.error("❌ Failed to delete file from Cloudinary:", err);
+        // Continue even if Cloudinary deletion fails (file might already be deleted)
+      }
     }
+    
+    // Legacy: Delete from GridFS if it exists (for backward compatibility)
+    if (media.gridFSId && gridFSBucket) {
+      try {
+        await gridFSBucket.delete(media.gridFSId);
+        console.log(`📁 Legacy file deleted from GridFS: ${media.name}`);
+      } catch (err) {
+        console.error("Failed to delete legacy file from GridFS:", err);
+      }
+    }
+    
+    data.media.splice(mediaIndex, 1); 
+    await saveData(data);
+    
+    // Broadcast media change for real-time updates
+    try { 
+      broadcast('events_changed', { reason: 'media_deleted', eventId: media.eventId }); 
+      broadcast('media_changed', { reason: 'deleted', eventId: media.eventId }); 
+    } catch {}
+    
+    res.json({ ok: true, message: "Media deleted successfully." });
+  } catch (err) {
+    console.error('❌ Media deletion error:', err);
+    res.status(500).json({ ok: false, error: err.message });
   }
-  
-  data.media.splice(mediaIndex, 1); 
-  await saveData(data);
-  
-  // Broadcast media change for real-time updates
-  try { 
-    broadcast('events_changed', { reason: 'media_deleted', eventId: media.eventId }); 
-    broadcast('media_changed', { reason: 'deleted', eventId: media.eventId }); 
-  } catch {}
-  
-  res.json({ ok: true, message: "Media deleted successfully." });
 });
 
 
@@ -1710,9 +1771,13 @@ app.put("/api/profile", async (req, res) => {
   res.json({ ok: true, message: "Profile updated successfully.", user: data.users[userIndex] });
 });
 
-// GridFS file serving endpoint
+// Legacy GridFS file serving endpoint (for backward compatibility with old media)
 app.get("/api/media/file/:fileId", async (req, res) => {
   try {
+    if (!gridFSBucket) {
+      return res.status(404).json({ ok: false, error: "GridFS not available. Media now stored in Cloudinary." });
+    }
+    
     const fileId = req.params.fileId;
     
     // Convert string to ObjectId
@@ -1854,65 +1919,70 @@ app.get("/api/messages/conversations", async (req, res) => {
 app.post('/api/messages/media', chatUpload.single('file'), async (req, res) => {
   try {
     const data = await loadData();
-  const { eventId, fromReg, toReg } = req.body;
-  if (!req.file || !eventId || !fromReg || !toReg) {
-    return res.status(400).json({ ok: false, error: 'Missing file or fields.' });
-  }
-  const event = data.events.find(e => e.id === Number(eventId));
-  if (!event) return res.status(404).json({ ok: false, error: 'Event not found.' });
-  const isOrganizer = event.creatorRegNumber === fromReg || event.creatorRegNumber === toReg;
-  const isBookedUser = !!event.bookings.find(b => b.regNumber === fromReg || b.regNumber === toReg);
-  const isVolunteer = Array.isArray(event.volunteers) && !!event.volunteers.find(v => v.regNumber === fromReg || v.regNumber === toReg);
-  if (!isOrganizer && !isBookedUser && !isVolunteer) {
-    return res.status(403).json({ ok: false, error: 'Only organizer and booked users/volunteers can chat for this event.' });
-  }
-    
-    // Compress media before storing
-    let processedBuffer = req.file.buffer;
-    let originalSize = req.file.buffer.length;
-    
-    try {
-      if (req.file.mimetype.startsWith('video/')) {
-        console.log(`🎬 Processing chat video: ${req.file.originalname} (${originalSize} bytes)`);
-        processedBuffer = await processVideo(req.file.buffer, req.file.originalname);
-        console.log(`✅ Chat video processed: ${originalSize} → ${processedBuffer.length} bytes`);
-      } else if (req.file.mimetype.startsWith('image/')) {
-        console.log(`🖼️ Processing chat image: ${req.file.originalname} (${originalSize} bytes)`);
-        processedBuffer = await processImage(req.file.buffer);
-        console.log(`✅ Chat image processed: ${originalSize} → ${processedBuffer.length} bytes`);
-      }
-    } catch (compressionError) {
-      console.error('⚠️ Chat compression failed, using original file:', compressionError.message);
-      processedBuffer = req.file.buffer; // Use original if compression fails
+    const { eventId, fromReg, toReg } = req.body;
+    if (!req.file || !eventId || !fromReg || !toReg) {
+      return res.status(400).json({ ok: false, error: 'Missing file or fields.' });
+    }
+    const event = data.events.find(e => e.id === Number(eventId));
+    if (!event) return res.status(404).json({ ok: false, error: 'Event not found.' });
+    const isOrganizer = event.creatorRegNumber === fromReg || event.creatorRegNumber === toReg;
+    const isBookedUser = !!event.bookings.find(b => b.regNumber === fromReg || b.regNumber === toReg);
+    const isVolunteer = Array.isArray(event.volunteers) && !!event.volunteers.find(v => v.regNumber === fromReg || v.regNumber === toReg);
+    if (!isOrganizer && !isBookedUser && !isVolunteer) {
+      return res.status(403).json({ ok: false, error: 'Only organizer and booked users/volunteers can chat for this event.' });
     }
     
-    // Store file in GridFS with promise-based approach
-    const uploadPromise = new Promise((resolve, reject) => {
-      const uploadStream = gridFSBucket.openUploadStream(req.file.originalname, {
-        metadata: {
-          eventId: Number(eventId),
-          uploadedBy: fromReg,
-          uploadedAt: new Date(),
-          mimeType: req.file.mimetype,
-          type: 'chat'
+    const mediaType = req.file.mimetype.startsWith('image/') ? 'photo' : 'video';
+    const resourceType = mediaType === 'photo' ? 'image' : 'video';
+    
+    console.log(`☁️ Uploading chat ${mediaType} to Cloudinary: ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(2)}MB)`);
+    
+    // Upload to Cloudinary
+    const uploadOptions = {
+      resource_type: resourceType,
+      folder: `campus-events/chat/${eventId}`,
+      public_id: `chat_${Date.now()}_${req.file.originalname.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9._-]/g, '')}`,
+      overwrite: false,
+      tags: [`event_${eventId}`, `chat`, `from_${fromReg}`],
+      context: {
+        eventId: eventId.toString(),
+        fromReg: fromReg,
+        toReg: toReg,
+        uploadedAt: new Date().toISOString(),
+        type: 'chat'
+      }
+    };
+
+    // Optimize for chat (smaller files)
+    if (resourceType === 'video') {
+      uploadOptions.quality = 'auto';
+      uploadOptions.format = 'mp4';
+    } else {
+      uploadOptions.quality = 'auto';
+      uploadOptions.fetch_format = 'auto';
+    }
+
+    // Upload to Cloudinary - convert buffer to data URI for upload
+    const cloudinaryResult = await new Promise((resolve, reject) => {
+      // For buffer uploads, we need to convert to data URI
+      const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+      
+      cloudinary.uploader.upload(
+        dataUri,
+        uploadOptions,
+        (error, result) => {
+          if (error) {
+            console.error('❌ Cloudinary chat upload error:', error);
+            reject(error);
+          } else {
+            resolve(result);
+          }
         }
-      });
-      
-      uploadStream.on('error', (error) => {
-        console.error('GridFS chat upload error:', error);
-        reject(error);
-      });
-      
-      uploadStream.on('finish', () => {
-        resolve(uploadStream.id);
-      });
-      
-      uploadStream.end(processedBuffer);
+      );
     });
     
-    // Wait for upload to complete
-    const fileId = await uploadPromise;
-    const mediaType = req.file.mimetype.startsWith('image/') ? 'photo' : 'video';
+    console.log(`✅ Chat file uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
+    
     const msg = { 
       id: Date.now(), 
       eventId: Number(eventId), 
@@ -1922,8 +1992,9 @@ app.post('/api/messages/media', chatUpload.single('file'), async (req, res) => {
       read: false, 
       type: 'media', 
       mediaType, 
-      url: `/api/media/file/${fileId}`,
-      gridFSId: fileId
+      url: cloudinaryResult.secure_url, // Cloudinary URL
+      cloudinaryId: cloudinaryResult.public_id,
+      publicId: cloudinaryResult.public_id
     };
     
     if (!data.messages) data.messages = [];
@@ -1937,9 +2008,10 @@ app.post('/api/messages/media', chatUpload.single('file'), async (req, res) => {
     data.notifications[fromReg].unshift({ msg: `✅ ${mediaType === 'photo' ? 'Image' : 'Video'} sent for '${event.title}'`, time: new Date().toISOString(), read: false, ...notifMeta });
     
     await saveData(data);
-    console.log(`📁 Chat file saved to GridFS: ${req.file.originalname} (${req.file.size} bytes)`);
+    console.log(`☁️ Chat file saved to Cloudinary: ${req.file.originalname}`);
     res.json({ ok: true, message: msg });
   } catch (err) {
+    console.error('❌ Chat media upload error:', err);
     res.status(500).json({ ok: false, error: 'Failed to save file.' });
   }
 });
@@ -1969,13 +2041,26 @@ app.delete('/api/messages/:messageId', async (req, res) => {
       return res.status(403).json({ ok: false, error: 'Not authorized to delete this message' });
     }
     
-    // Delete from GridFS if it's a media message
-    if (message.type === 'media' && message.gridFSId) {
+    // Delete from Cloudinary if it's a media message
+    if (message.type === 'media' && (message.cloudinaryId || message.publicId)) {
+      try {
+        const publicId = message.cloudinaryId || message.publicId;
+        const resourceType = message.mediaType === 'photo' ? 'image' : 'video';
+        const result = await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+        console.log(`☁️ Chat media deleted from Cloudinary: ${publicId}`, result);
+      } catch (err) {
+        console.error('❌ Failed to delete chat media from Cloudinary:', err);
+        // Continue even if Cloudinary deletion fails
+      }
+    }
+    
+    // Legacy: Delete from GridFS if it exists (for backward compatibility)
+    if (message.type === 'media' && message.gridFSId && gridFSBucket) {
       try {
         await gridFSBucket.delete(message.gridFSId);
-        console.log(`📁 Chat media deleted from GridFS: ${message.gridFSId}`);
+        console.log(`📁 Legacy chat media deleted from GridFS: ${message.gridFSId}`);
       } catch (err) {
-        console.error('Failed to delete chat media from GridFS:', err);
+        console.error('Failed to delete legacy chat media from GridFS:', err);
       }
     }
     
@@ -1986,7 +2071,7 @@ app.delete('/api/messages/:messageId', async (req, res) => {
     console.log(`🗑️ Chat message deleted: ${messageId}`);
     res.json({ ok: true, message: 'Message deleted permanently' });
   } catch (err) {
-    console.error('Chat deletion error:', err);
+    console.error('❌ Chat deletion error:', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
