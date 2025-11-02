@@ -681,8 +681,10 @@ async function sendOTP(phone, email, code) {
           phoneNumber = "91" + phoneNumber;
         }
         
-        // Fast2SMS API - Using GET method with authorization header
-        const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(FAST2SMS_API_KEY)}&route=otp&variables_values=${encodeURIComponent(code)}&numbers=${phoneNumber}`;
+        // Fast2SMS API - Using quick route (route=q) for OTP messages
+        // Changed from route=otp to route=q because OTP route requires website verification
+        const message = `Your OTP for Campus Event Hub is ${code}. Valid for 5 minutes.`;
+        const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(FAST2SMS_API_KEY)}&route=q&message=${encodeURIComponent(message)}&numbers=${phoneNumber}`;
         
         console.log(`📤 Attempting to send OTP via Fast2SMS to: ${masked} (${phoneNumber.length} digits)`);
         
