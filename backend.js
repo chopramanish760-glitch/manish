@@ -5,9 +5,11 @@ const path = require("path");
 const { MongoClient, GridFSBucket, ObjectId } = require("mongodb");
 const cors = require("cors");
 const cloudinary = require("cloudinary").v2;
-const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Node.js 18+ has native fetch built-in, use it directly
+// If somehow not available, we'll handle it in the keep-alive function
 
 app.use(express.json({ limit: '50mb' })); // Increase JSON limit for large video uploads
 app.use(cors());
@@ -116,8 +118,9 @@ async function initMongoDB() {
     db = client.db(DB_NAME);
     collection = db.collection(COLLECTION_NAME);
     
-    // Initialize GridFS bucket for media storage
-    gridFSBucket = new GridFSBucket(db, { bucketName: 'media' });
+    // GridFS is no longer used - all media is stored in Cloudinary
+    // Only keep GridFS bucket reference for backward compatibility (legacy file deletion)
+    // gridFSBucket is intentionally not initialized for new uploads
     
     // Test a simple operation
     console.log("🔍 Testing database operations...");
@@ -129,7 +132,7 @@ async function initMongoDB() {
     console.log("📊 Database indexes created");
     
     console.log("✅ Connected to MongoDB Atlas successfully!");
-    console.log("📁 GridFS bucket initialized for media storage");
+    console.log("☁️ Media storage: Cloudinary (GridFS not used for new uploads)");
     return true;
   } catch (err) {
     console.error("❌ MongoDB connection failed:", err.message);
@@ -308,16 +311,56 @@ async function startSelfKeepAlive() {
     try {
       const url = KEEP_ALIVE_URL;
       
-      // Create AbortController for timeout (5 seconds)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-      
-      const response = await fetch(url, {
-        method: 'GET',
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
+      // Use native fetch (Node.js 18+) or fallback to http module
+      let response;
+      if (typeof globalThis.fetch === 'function') {
+        // Use native fetch with AbortController for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        try {
+          response = await globalThis.fetch(url, {
+            method: 'GET',
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+        } catch (err) {
+          clearTimeout(timeoutId);
+          throw err;
+        }
+      } else {
+        // Fallback: Use http module for localhost requests
+        const http = require('http');
+        const urlObj = new URL(url);
+        
+        response = await new Promise((resolve, reject) => {
+          const req = http.request({
+            hostname: urlObj.hostname,
+            port: urlObj.port || 80,
+            path: urlObj.pathname,
+            method: 'GET',
+            timeout: 5000
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              resolve({
+                ok: res.statusCode >= 200 && res.statusCode < 300,
+                status: res.statusCode,
+                json: async () => JSON.parse(data)
+              });
+            });
+          });
+          
+          req.on('error', reject);
+          req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request timeout'));
+          });
+          
+          req.end();
+        });
+      }
       
       if (response.ok) {
         const data = await response.json();
@@ -327,7 +370,7 @@ async function startSelfKeepAlive() {
       }
     } catch (error) {
       // Only log if it's not a connection error (which is expected on first start)
-      if (error.name !== 'AbortError' && error.code !== 'ECONNREFUSED' && error.code !== 'ENOTFOUND') {
+      if (error.name !== 'AbortError' && error.code !== 'ECONNREFUSED' && error.code !== 'ENOTFOUND' && error.message !== 'Request timeout') {
         console.error(`❌ Keep-alive ping error: ${error.message}`);
       }
     }
@@ -1548,7 +1591,8 @@ app.get('/api/data/persistence', async (req, res) => {
     res.json({
       ok: true,
       persistence: {
-        storageType: mongoConnected ? "MongoDB Atlas + GridFS" : "Local File System",
+        storageType: mongoConnected ? "MongoDB Atlas + Cloudinary" : "Local File System + Cloudinary",
+        mediaStorage: "Cloudinary (Cloud CDN)",
         mongoConnected: mongoConnected,
         dataFile: {
           exists: true,
@@ -1559,8 +1603,8 @@ app.get('/api/data/persistence', async (req, res) => {
         },
         uploadsFolder: {
           exists: true,
-          path: mongoConnected ? "GridFS Bucket" : PERSISTENT_UPLOAD_DIR,
-          fileCount: mongoConnected ? "N/A (GridFS)" : (fs.existsSync(PERSISTENT_UPLOAD_DIR) ? fs.readdirSync(PERSISTENT_UPLOAD_DIR).length : 0)
+          path: "Cloudinary Cloud Storage",
+          fileCount: "N/A (Cloudinary)"
         },
         backups: {
           count: mongoConnected ? "N/A (MongoDB)" : (fs.existsSync(PERSISTENT_BACKUP_DIR) ? fs.readdirSync(PERSISTENT_BACKUP_DIR).filter(f => f.endsWith('.json')).length : 0),
@@ -1616,7 +1660,7 @@ app.get("/api/waitlist/:eventId", async (req, res) => {
 
 app.post("/api/notifications/mark-read", async (req, res) => { const data = await loadData(); const { regNumber } = req.body; if (data.notifications && data.notifications[regNumber]) { data.notifications[regNumber].forEach(n => n.read = true); await saveData(data); } res.json({ ok: true }); });
 
-// Configure multer for memory storage (GridFS will handle file storage)
+// Configure multer for memory storage (Cloudinary will handle file storage)
 const upload = multer({ 
   storage: multer.memoryStorage(),
   limits: { fileSize: 30 * 1024 * 1024 }, // 30MB limit for videos
