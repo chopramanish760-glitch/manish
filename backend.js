@@ -5,6 +5,7 @@ const path = require("path");
 const { MongoClient, GridFSBucket, ObjectId } = require("mongodb");
 const cors = require("cors");
 const cloudinary = require("cloudinary").v2;
+const nodemailer = require("nodemailer");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -663,87 +664,95 @@ function maskPhoneNumber(phone) {
   return 'xxxxxx' + last4;
 }
 
-// Send OTP via phone/email (simulated - in production use SMS/Email service)
+// Send OTP via email using AhaSend SMTP (changed from SMS to Email OTP)
 async function sendOTP(phone, email, code) {
-  if (phone) {
-    const masked = maskPhoneNumber(phone);
+  // Prioritize email over phone - send OTP via email
+  if (email) {
+    const maskedEmail = email.replace(/(.{2})(.*)(@.*)/, '$1****$3'); // Mask email for logging
     
-    // Fast2SMS integration (FREE - no billing required)
-    const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY;
+    // AhaSend SMTP configuration
+    const AHASEND_SMTP_USERNAME = process.env.AHASEND_SMTP_USERNAME || "WtooEmLG11";
+    const AHASEND_SMTP_PASSWORD = process.env.AHASEND_SMTP_PASSWORD || "DVZIKGW0cZqU4PM9a3qhXTR1";
+    const AHASEND_SMTP_HOST = process.env.AHASEND_SMTP_HOST || "send.ahasend.com"; // Use send-us.ahasend.com for US
+    const AHASEND_SMTP_PORT = parseInt(process.env.AHASEND_SMTP_PORT || "587");
+    const AHASEND_FROM_EMAIL = process.env.AHASEND_FROM_EMAIL || "[email protected]";
+    const AHASEND_FROM_NAME = process.env.AHASEND_FROM_NAME || "Campus Event Hub";
     
-    if (FAST2SMS_API_KEY) {
+    if (AHASEND_SMTP_USERNAME && AHASEND_SMTP_PASSWORD) {
       try {
-        // Format phone number (ensure it's just digits, add 91 if Indian number missing country code)
-        let phoneNumber = phone.replace(/[^0-9]/g, ""); // Remove non-digits
-        
-        // If number is 10 digits, assume Indian number and add country code 91
-        if (phoneNumber.length === 10) {
-          phoneNumber = "91" + phoneNumber;
-        }
-        
-        // Fast2SMS API - Using quick route (route=q) for OTP messages
-        // Changed from route=otp to route=q because OTP route requires website verification
-        const message = `Your OTP for Campus Event Hub is ${code}. Valid for 5 minutes.`;
-        const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(FAST2SMS_API_KEY)}&route=q&message=${encodeURIComponent(message)}&numbers=${phoneNumber}`;
-        
-        console.log(`📤 Attempting to send OTP via Fast2SMS to: ${masked} (${phoneNumber.length} digits)`);
-        
-        const response = await fetch(url, {
-          method: "GET",
-          headers: {
-            "authorization": FAST2SMS_API_KEY,
-            "Content-Type": "application/json"
+        // Create SMTP transporter
+        const transporter = nodemailer.createTransport({
+          host: AHASEND_SMTP_HOST,
+          port: AHASEND_SMTP_PORT,
+          secure: false, // true for 465, false for other ports
+          auth: {
+            user: AHASEND_SMTP_USERNAME,
+            pass: AHASEND_SMTP_PASSWORD
+          },
+          tls: {
+            // StartTLS is required for AhaSend
+            ciphers: 'SSLv3'
           }
         });
         
-        const responseText = await response.text();
-        let result;
+        const emailSubject = "Your OTP for Campus Event Hub";
+        const emailText = `Your OTP code is: ${code}\n\nThis code is valid for 5 minutes.\n\nIf you didn't request this OTP, please ignore this email.`;
+        const emailHtml = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #333;">Your OTP Code</h2>
+            <p style="font-size: 18px; color: #666;">Your OTP for Campus Event Hub is:</p>
+            <div style="background-color: #f4f4f4; padding: 20px; text-align: center; margin: 20px 0; border-radius: 5px;">
+              <h1 style="color: #2c3e50; margin: 0; font-size: 32px; letter-spacing: 5px;">${code}</h1>
+            </div>
+            <p style="color: #666;">This code is valid for <strong>5 minutes</strong>.</p>
+            <p style="color: #999; font-size: 12px; margin-top: 30px;">If you didn't request this OTP, please ignore this email.</p>
+          </div>
+        `;
         
-        try {
-          result = JSON.parse(responseText);
-        } catch (parseError) {
-          console.error(`❌ Fast2SMS API returned invalid JSON: ${responseText}`);
-          console.log(`📱 OTP sent to ${masked}: ${code} (API response error, check logs)`);
-          return { phone: masked, email: null, sent: false };
-        }
+        console.log(`📧 Attempting to send OTP via AhaSend SMTP to: ${maskedEmail}`);
         
-        console.log(`📥 Fast2SMS API Response: ${JSON.stringify(result)}`);
+        // Send email
+        const info = await transporter.sendMail({
+          from: `"${AHASEND_FROM_NAME}" <${AHASEND_FROM_EMAIL}>`,
+          to: email,
+          subject: emailSubject,
+          text: emailText,
+          html: emailHtml
+        });
         
-        if (result.return === true || result.return === "true") {
-          console.log(`✅ OTP SMS sent successfully to ${masked} via Fast2SMS`);
-          console.log(`   Request ID: ${result.request_id || 'N/A'}`);
-          if (result.message && Array.isArray(result.message)) {
-            console.log(`   Message: ${result.message.join(', ')}`);
-          }
-          return { phone: masked, email: null, sent: true };
-        } else {
-          console.error(`❌ Fast2SMS error: ${JSON.stringify(result)}`);
-          console.error(`   Full response: ${responseText}`);
-          if (result.message) {
-            console.error(`   Error message: ${Array.isArray(result.message) ? result.message.join(', ') : result.message}`);
-          }
-          // Fallback to console log if SMS fails
-          console.log(`📱 OTP sent to ${masked}: ${code} (SMS service unavailable, check logs)`);
-          return { phone: masked, email: null, sent: false };
-        }
+        console.log(`✅ OTP Email sent successfully to ${maskedEmail} via AhaSend SMTP`);
+        console.log(`   Message ID: ${info.messageId}`);
+        console.log(`   Response: ${info.response}`);
+        
+        return { phone: null, email: maskedEmail, sent: true };
+        
       } catch (error) {
-        console.error(`❌ Error sending SMS via Fast2SMS: ${error.message}`);
+        console.error(`❌ Error sending email via AhaSend SMTP: ${error.message}`);
+        console.error(`   Error code: ${error.code || 'N/A'}`);
         console.error(`   Error stack: ${error.stack}`);
-        // Fallback to console log if SMS fails
-        console.log(`📱 OTP sent to ${masked}: ${code} (SMS service error, check logs)`);
-        return { phone: masked, email: null, sent: false };
+        
+        // Fallback to console log if email fails
+        console.log(`📧 OTP sent to ${maskedEmail}: ${code} (Email service error, check logs)`);
+        return { phone: null, email: maskedEmail, sent: false };
       }
     } else {
-      // No API key configured - fallback to console log
-      console.log(`📱 OTP sent to ${masked}: ${code}`);
-      console.log(`⚠️  Fast2SMS_API_KEY not set. To enable SMS, get free API key from https://www.fast2sms.com and set FAST2SMS_API_KEY environment variable.`);
-      return { phone: masked, email: null, sent: false };
+      // No SMTP credentials configured - fallback to console log
+      console.log(`📧 OTP sent to ${email}: ${code}`);
+      console.log(`⚠️  AhaSend SMTP credentials not set. To enable email OTP:`);
+      console.log(`   - Set AHASEND_SMTP_USERNAME environment variable`);
+      console.log(`   - Set AHASEND_SMTP_PASSWORD environment variable`);
+      console.log(`   - Optional: Set AHASEND_SMTP_HOST (default: send.ahasend.com)`);
+      console.log(`   - Optional: Set AHASEND_FROM_EMAIL and AHASEND_FROM_NAME`);
+      return { phone: null, email: email.replace(/(.{2})(.*)(@.*)/, '$1****$3'), sent: false };
     }
-  } else if (email) {
-    console.log(`📧 OTP sent to ${email}: ${code}`);
-    // Email service can be added later if needed
-    return { phone: null, email, sent: false };
+  } else if (phone) {
+    // Email not available, log phone but don't send SMS (switched to email-only OTP)
+    const masked = maskPhoneNumber(phone);
+    console.log(`📱 Phone provided but OTP is now sent via EMAIL only: ${masked}`);
+    console.log(`⚠️  User should use email address for OTP delivery`);
+    return { phone: masked, email: null, sent: false };
   }
+  
   return { phone: null, email: null, sent: false };
 }
 
@@ -774,9 +783,11 @@ app.post("/api/otp/request-signup", async (req, res) => {
     
     return res.json({ 
       ok: true, 
-      message: "OTP sent successfully",
+      message: sendResult.sent ? "OTP sent successfully via email" : "OTP generated (check backend logs for email status)",
       maskedPhone: sendResult.phone || null,
-      email: email ? email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null // Mask email partially
+      maskedEmail: sendResult.email || null,
+      email: email ? email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null, // Mask email partially
+      emailSent: sendResult.sent || false
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -838,10 +849,11 @@ app.post("/api/otp/request-reset", async (req, res) => {
     
     return res.json({ 
       ok: true, 
-      message: sendResult.sent ? "OTP sent successfully via SMS" : "OTP generated (check backend logs for SMS status)",
+      message: sendResult.sent ? "OTP sent successfully via email" : "OTP generated (check backend logs for email status)",
       maskedPhone: sendResult.phone || null,
+      maskedEmail: sendResult.email || null,
       email: user.email ? user.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null,
-      smsSent: sendResult.sent || false
+      emailSent: sendResult.sent || false
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
