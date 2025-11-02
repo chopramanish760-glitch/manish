@@ -837,7 +837,15 @@ async function renderMedia() {
                     mediaUrl = m.url.startsWith('/') ? `${API_BASE}${m.url}` : `${API_BASE}/${m.url}`;
                 }
                 if (m.type === "photo") sectionHtml += `<div class=\"media-item\"><img src=\"${mediaUrl}\" onclick=\"showLightbox('${m.url || m._id}', 'photo')\"></div>`;
-                if (m.type === "video") sectionHtml += `<div class=\"media-item\" onclick=\"showLightbox('${m.url || m._id}', 'video')\"><video src=\"${mediaUrl}\" preload=\"metadata\" playsinline webkit-playsinline controls style=\"width:100%; height:100%; object-fit:cover;\"></video><div class=\"play-overlay\"><div class=\"play-icon\">▶</div></div></div>`;
+                if (m.type === "video") {
+                    // Add Cloudinary video optimization parameters for faster loading
+                    let optimizedVideoUrl = mediaUrl;
+                    if (mediaUrl && mediaUrl.includes('cloudinary.com') && !mediaUrl.includes('/q_')) {
+                        // Add video optimization parameters for faster streaming
+                        optimizedVideoUrl = mediaUrl.replace(/\.(mp4|webm|ogg)/, '/q_auto,f_auto,vc_auto,ac_auto,fl_progressive.$1');
+                    }
+                    sectionHtml += `<div class=\"media-item\" onclick=\"showLightbox('${m.url || m._id}', 'video')\"><video src=\"${optimizedVideoUrl}\" preload=\"metadata\" playsinline webkit-playsinline controls style=\"width:100%; height:100%; object-fit:cover;\"></video><div class=\"play-overlay\"><div class=\"play-icon\">▶</div></div></div>`;
+                }
             });
             sectionHtml += `</div></div>`;
         });
@@ -3209,18 +3217,26 @@ function showLightbox(e,t){
     let mediaHtml = '';
     if (t === 'photo') mediaHtml = `<img src="${fullUrl}">`;
     if (t === 'video') {
+        // Optimize Cloudinary video URL for faster streaming
+        let optimizedVideoUrl = fullUrl;
+        if (fullUrl && fullUrl.includes('cloudinary.com')) {
+            // Add streaming optimizations for faster playback
+            if (!fullUrl.includes('/q_')) {
+                // Add progressive streaming, auto quality, auto format
+                optimizedVideoUrl = fullUrl.replace(/\.(mp4|webm|ogg)/, '/q_auto,f_auto,vc_auto,ac_auto,fl_progressive.$1');
+            }
+        }
         mediaHtml = `
             <div style="position: relative; text-align: center;">
-                <video src="${fullUrl}" 
+                <video src="${optimizedVideoUrl}" 
                        controls 
-                       preload="metadata" 
+                       preload="auto" 
                        playsinline 
                        webkit-playsinline 
                        muted
                        style="max-width: 100%; max-height: 80vh; background: #000;">
-        <source src="${fullUrl}" type="video/mp4">
-        <source src="${fullUrl}" type="video/webm">
-        <source src="${fullUrl}" type="video/ogg">
+        <source src="${optimizedVideoUrl}" type="video/mp4">
+        <source src="${optimizedVideoUrl.replace(/\.mp4/, '.webm')}" type="video/webm">
         Your browser does not support the video tag.
                 </video>
             </div>
@@ -3273,30 +3289,41 @@ async function showMapModal(venue) {
                 <div class="muted" style="font-size:0.9rem; color:#a1a1aa;">NITK Surathkal • <span id="etaHeader"></span></div>
             </div>
         </div>
-        <div id="leaflet-map" style="flex:1"></div>
+        <div id="leaflet-map" style="flex:1; background:#1a1a1a; position:relative;">
+            <div id="map-loading" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#7c3aed; font-size:1.1rem; z-index:1000;">📍 Loading map...</div>
+        </div>
         <div style="padding:10px; background:#2a2a2a; border-top:1px solid #333; display:flex; gap:10px">
             <button id="routeBtn" class="btn" style="flex:1; opacity:0.6; pointer-events:none;" onclick="drawRouteOnLeafletMap()">🧭 Show Route</button>
             <button class="btn" style="flex:1" onclick="openExternalNavFromMap()">🗺️ Get Directions</button>
         </div>
     </div>`;
     
+    // Pre-load Leaflet scripts in background (should already be preloaded)
+    const leafletPromise = typeof L !== 'undefined' ? Promise.resolve() : loadLeafletScripts();
+    
     try {
-        // Load Leaflet if not already loaded
-        if (typeof L === 'undefined') {
-            await loadLeafletScripts();
-        }
+        // Wait for Leaflet to load (should be instant if preloaded)
+        await leafletPromise;
         
+        // Resolve venue location
         const target = await resolveVenueLatLng(venue);
+        
+        // Remove loading indicator and initialize map
+        const loadingEl = document.getElementById('map-loading');
+        if (loadingEl) loadingEl.remove();
+        
         initLeafletMap(target, venue);
     } catch (err) {
         console.error('Map initialization error:', err);
         const mapDiv = document.getElementById('leaflet-map');
+        const loadingEl = document.getElementById('map-loading');
+        if (loadingEl) loadingEl.remove();
+        
         const text = document.createElement('div');
         text.className = 'muted';
-        text.style.cssText = 'padding:16px; color:#a1a1aa;';
+        text.style.cssText = 'padding:16px; color:#a1a1aa; text-align:center; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);';
         text.textContent = 'Map failed to load. Try reloading or use Get Directions.';
         if (mapDiv) {
-            mapDiv.innerHTML = '';
             mapDiv.appendChild(text);
         }
     }
@@ -3310,27 +3337,54 @@ function loadLeafletScripts() {
             return;
         }
         
-        // Load Leaflet JS
-        const leafletScript = document.createElement('script');
-        leafletScript.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-        leafletScript.integrity = 'sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=';
-        leafletScript.crossOrigin = '';
+        // Check if script is already being loaded
+        if (window.__leafletLoading) {
+            window.__leafletLoading.then(resolve).catch(reject);
+            return;
+        }
         
-        leafletScript.onload = () => {
-            // Load Leaflet Routing Machine
-            const routingScript = document.createElement('script');
-            routingScript.src = 'https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js';
-            routingScript.onload = () => resolve();
-            routingScript.onerror = () => {
-                console.warn('Leaflet Routing Machine failed to load, continuing without routing');
-                resolve(); // Continue without routing
+        // Create loading promise
+        window.__leafletLoading = new Promise((loadResolve, loadReject) => {
+            // Load Leaflet JS
+            const leafletScript = document.createElement('script');
+            leafletScript.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+            leafletScript.integrity = 'sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=';
+            leafletScript.crossOrigin = '';
+            
+            leafletScript.onload = () => {
+                // Load Leaflet Routing Machine
+                const routingScript = document.createElement('script');
+                routingScript.src = 'https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js';
+                routingScript.onload = () => {
+                    window.__leafletLoading = null;
+                    loadResolve();
+                };
+                routingScript.onerror = () => {
+                    console.warn('Leaflet Routing Machine failed to load, continuing without routing');
+                    window.__leafletLoading = null;
+                    loadResolve(); // Continue without routing
+                };
+                document.head.appendChild(routingScript);
             };
-            document.head.appendChild(routingScript);
-        };
-        leafletScript.onerror = reject;
-        document.head.appendChild(leafletScript);
+            leafletScript.onerror = (err) => {
+                window.__leafletLoading = null;
+                loadReject(err);
+            };
+            document.head.appendChild(leafletScript);
+        });
+        
+        window.__leafletLoading.then(resolve).catch(reject);
     });
 }
+
+// Preload Leaflet scripts on page load for faster map display
+(function preloadLeaflet() {
+    if (typeof L === 'undefined') {
+        loadLeafletScripts().catch(() => {
+            console.warn('Failed to preload Leaflet, will load on demand');
+        });
+    }
+})();
 
 let lastVenueLatLng = null, lastVenueName = '', lastUserLatLng = null;
 let watchId = null;
@@ -4363,29 +4417,7 @@ async function adminLoadStats(){
     }
 }
 
-async function adminExportData() {
-    try {
-        const r = await fetch(API + '/admin/export');
-        const d = await r.json();
-        
-        if (r.ok && d.ok) {
-            const blob = new Blob([JSON.stringify(d.data, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `campus-event-hub-backup-${new Date().toISOString().slice(0, 10)}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            alert('✅ Data exported successfully!');
-        } else {
-            alert('❌ Error: ' + (d.error || 'Failed to export data'));
-        }
-    } catch (err) {
-        alert('❌ Network error: ' + err.message);
-    }
-}
+// Removed: adminExportData function - export data feature removed from admin panel
 
 // ---------- Debug & Data Management ----------
 async function checkBackendStatus() {
@@ -4416,22 +4448,7 @@ async function checkDataIntegrity() {
     return null;
 }
 
-async function exportData() {
-    try {
-        const res = await fetch(API + '/data/export');
-        const data = await res.text();
-        const blob = new Blob([data], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `campus-event-hub-backup-${new Date().toISOString().split('T')[0]}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        alert('✅ Data exported successfully!');
-    } catch (err) {
-        alert('❌ Export failed: ' + err.message);
-    }
-}
+// Removed: exportData function - export data feature removed
 
 async function importData() {
     const input = document.createElement('input');

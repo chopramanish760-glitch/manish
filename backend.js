@@ -443,44 +443,51 @@ async function checkCompletedEventsForFeedback() {
     const now = new Date();
     
     if (!data.feedbacks) data.feedbacks = [];
+    if (!data.eventNotifications) data.eventNotifications = {};
     
     for (const event of data.events) {
+      // Skip if no bookings
+      if (!event.bookings || event.bookings.length === 0) continue;
+      
+      // Check if already sent feedback notifications
+      const feedbackNotificationKey = `feedback_notified_${event.id}`;
+      if (data.eventNotifications[feedbackNotificationKey]) continue;
+      
       const eventStart = new Date(`${event.date}T${event.time}`);
       const eventEnd = new Date(eventStart.getTime() + (event.duration || 0) * 60000);
       
-      // Check if event just completed (within the last 10 minutes)
+      // Check if event has completed (end time is in the past)
       const timeSinceEnd = now.getTime() - eventEnd.getTime();
-      const tenMinutes = 10 * 60 * 1000;
       
-      if (timeSinceEnd >= 0 && timeSinceEnd <= tenMinutes && event.bookings && event.bookings.length > 0) {
-        // Check if we already sent feedback notifications for this event
-        const feedbackNotificationKey = `feedback_notified_${event.id}`;
-        if (!data.eventNotifications) data.eventNotifications = {};
-        
-        if (!data.eventNotifications[feedbackNotificationKey]) {
-          // Send feedback request notifications to all booked users
-          for (const booking of event.bookings) {
-            if (!data.notifications[booking.regNumber]) {
-              data.notifications[booking.regNumber] = [];
-            }
-            
-            const notificationMsg = `📝 "${event.title}" has completed! Please share your feedback.`;
-            data.notifications[booking.regNumber].unshift({
-              msg: notificationMsg,
-              time: now.toISOString(),
-              read: false,
-              type: 'feedback',
-              eventId: event.id,
-              eventTitle: event.title
-            });
+      // Send notifications if event completed (any time in the past, not just last 10 minutes)
+      // But only if it's been at least 1 minute since event ended (give it time to finish)
+      const oneMinute = 1 * 60 * 1000;
+      
+      if (timeSinceEnd >= oneMinute) {
+        // Send feedback request notifications to all booked users
+        let notificationCount = 0;
+        for (const booking of event.bookings) {
+          if (!data.notifications[booking.regNumber]) {
+            data.notifications[booking.regNumber] = [];
           }
           
-          // Mark that we've sent feedback notifications for this event
-          data.eventNotifications[feedbackNotificationKey] = true;
-          await saveData(data);
-          
-          console.log(`📝 Sent feedback request notifications to ${event.bookings.length} booked users for event: ${event.title}`);
+          const notificationMsg = `📝 "${event.title}" has completed! Please share your feedback.`;
+          data.notifications[booking.regNumber].unshift({
+            msg: notificationMsg,
+            time: now.toISOString(),
+            read: false,
+            type: 'feedback',
+            eventId: event.id,
+            eventTitle: event.title
+          });
+          notificationCount++;
         }
+        
+        // Mark that we've sent feedback notifications for this event
+        data.eventNotifications[feedbackNotificationKey] = true;
+        await saveData(data);
+        
+        console.log(`📝 Sent feedback request notifications to ${notificationCount} booked users for completed event: ${event.title} (ended ${Math.round(timeSinceEnd / 60000)} minutes ago)`);
       }
     }
   } catch (error) {
@@ -1784,43 +1791,79 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
       }
     };
 
-    // For videos, add transformation options
+    // For videos, add optimized transformation options for faster upload and playback
     if (resourceType === 'video') {
       uploadOptions.eager = [
-        { quality: 'auto', format: 'mp4' }
+        { 
+          quality: 'auto',
+          format: 'mp4',
+          video_codec: 'h264',
+          audio_codec: 'aac',
+          bit_rate: 'auto',
+          streaming_profile: 'auto'
+        },
+        {
+          quality: 'auto',
+          format: 'mp4',
+          transformation: [{ width: 1280, height: 720, crop: 'limit' }]
+        }
       ];
+      uploadOptions.eager_async = false; // Process immediately for faster availability
+      uploadOptions.invalidate = true; // Clear CDN cache for updated videos
     } else {
       // For images, optimize quality
       uploadOptions.quality = 'auto';
       uploadOptions.fetch_format = 'auto';
     }
 
-    // Upload to Cloudinary - convert buffer to data URI for upload
+    // Upload to Cloudinary - use stream upload for better performance (especially for videos)
     const cloudinaryResult = await new Promise((resolve, reject) => {
-      // For buffer uploads, we need to convert to data URI
-      const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-      
-      cloudinary.uploader.upload(
-        dataUri,
-        uploadOptions,
-        (error, result) => {
-          if (error) {
-            console.error('❌ Cloudinary upload error:', error);
-            reject(error);
-          } else {
-            resolve(result);
+      // For videos, use stream upload which is more efficient for large files
+      if (resourceType === 'video') {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          uploadOptions,
+          (error, result) => {
+            if (error) {
+              console.error('❌ Cloudinary upload error:', error);
+              reject(error);
+            } else {
+              resolve(result);
+            }
           }
-        }
-      );
+        );
+        uploadStream.end(req.file.buffer);
+      } else {
+        // For images, use data URI (smaller files)
+        const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+        cloudinary.uploader.upload(
+          dataUri,
+          uploadOptions,
+          (error, result) => {
+            if (error) {
+              console.error('❌ Cloudinary upload error:', error);
+              reject(error);
+            } else {
+              resolve(result);
+            }
+          }
+        );
+      }
     });
     
     console.log(`✅ File uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
+    
+    // Use eager transformation URL if available (for videos, this is optimized)
+    let mediaUrl = cloudinaryResult.secure_url;
+    if (type === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
+      // Use the optimized eager transformation URL for faster playback
+      mediaUrl = cloudinaryResult.eager[0].secure_url || cloudinaryResult.secure_url;
+    }
     
     const media = { 
       id: Date.now(),
       eventId: parseInt(eventId), 
       name: req.file.originalname, 
-      url: cloudinaryResult.secure_url, // Cloudinary URL
+      url: mediaUrl, // Cloudinary URL (optimized for videos)
       publicId: cloudinaryResult.public_id, // Cloudinary public ID for deletion
       type,
       size: req.file.size,
@@ -2112,35 +2155,66 @@ app.post('/api/messages/media', chatUpload.single('file'), async (req, res) => {
       }
     };
 
-    // Optimize for chat (smaller files)
+    // Optimize for chat (smaller files, faster upload)
     if (resourceType === 'video') {
-      uploadOptions.quality = 'auto';
-      uploadOptions.format = 'mp4';
+      uploadOptions.eager = [
+        {
+          quality: 'auto',
+          format: 'mp4',
+          video_codec: 'h264',
+          audio_codec: 'aac',
+          bit_rate: '500k', // Lower bitrate for chat videos (faster upload/playback)
+          transformation: [{ width: 854, height: 480, crop: 'limit' }] // Limit size for chat
+        }
+      ];
+      uploadOptions.eager_async = false;
     } else {
       uploadOptions.quality = 'auto';
       uploadOptions.fetch_format = 'auto';
     }
 
-    // Upload to Cloudinary - convert buffer to data URI for upload
+    // Upload to Cloudinary - use stream upload for videos
     const cloudinaryResult = await new Promise((resolve, reject) => {
-      // For buffer uploads, we need to convert to data URI
-      const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-      
-      cloudinary.uploader.upload(
-        dataUri,
-        uploadOptions,
-        (error, result) => {
-          if (error) {
-            console.error('❌ Cloudinary chat upload error:', error);
-            reject(error);
-          } else {
-            resolve(result);
+      // For videos, use stream upload which is more efficient
+      if (resourceType === 'video') {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          uploadOptions,
+          (error, result) => {
+            if (error) {
+              console.error('❌ Cloudinary chat upload error:', error);
+              reject(error);
+            } else {
+              resolve(result);
+            }
           }
-        }
-      );
+        );
+        uploadStream.end(req.file.buffer);
+      } else {
+        // For images, use data URI
+        const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+        cloudinary.uploader.upload(
+          dataUri,
+          uploadOptions,
+          (error, result) => {
+            if (error) {
+              console.error('❌ Cloudinary chat upload error:', error);
+              reject(error);
+            } else {
+              resolve(result);
+            }
+          }
+        );
+      }
     });
     
     console.log(`✅ Chat file uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
+    
+    // Use eager transformation URL if available (for videos, this is optimized)
+    let mediaUrl = cloudinaryResult.secure_url;
+    if (mediaType === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
+      // Use the optimized eager transformation URL for faster playback
+      mediaUrl = cloudinaryResult.eager[0].secure_url || cloudinaryResult.secure_url;
+    }
     
     const msg = { 
       id: Date.now(), 
@@ -2151,7 +2225,7 @@ app.post('/api/messages/media', chatUpload.single('file'), async (req, res) => {
       read: false, 
       type: 'media', 
       mediaType, 
-      url: cloudinaryResult.secure_url, // Cloudinary URL
+      url: mediaUrl, // Cloudinary URL (optimized for videos)
       cloudinaryId: cloudinaryResult.public_id,
       publicId: cloudinaryResult.public_id
     };
