@@ -5,6 +5,7 @@ const path = require("path");
 const { MongoClient, GridFSBucket, ObjectId } = require("mongodb");
 const cors = require("cors");
 const cloudinary = require("cloudinary").v2;
+const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -48,9 +49,10 @@ const PERSISTENT_UPLOAD_DIR = (IS_RENDER && HAS_PERSISTENT_DISK) ? "/opt/render/
 const PERSISTENT_BACKUP_DIR = (IS_RENDER && HAS_PERSISTENT_DISK) ? "/opt/render/project/backups" : BACKUP_DIR;
 
 // MongoDB Configuration for Permanent Data Storage
-const MONGODB_URI = "mongodb+srv://chopramanish760_db_user:Xg8dNsvyQ0YSYIjt@campus.urvjcdt.mongodb.net/campus_event_hub?retryWrites=true&w=majority&appName=campus";
-const DB_NAME = "campus_event_hub";
-const COLLECTION_NAME = "app_data";
+// Can be overridden via MONGODB_URI environment variable for security
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://p70242086_db_user:jG9ebjpdn8PQRLyw@cluster0.zpbbagj.mongodb.net/campus_event_hub?retryWrites=true&w=majority&appName=Cluster0";
+const DB_NAME = process.env.MONGODB_DB_NAME || "campus_event_hub";
+const COLLECTION_NAME = process.env.MONGODB_COLLECTION || "app_data";
 
 // Cloudinary Configuration for Media Storage
 // Support both CLOUDINARY_URL and individual environment variables
@@ -278,10 +280,68 @@ async function initializeApp() {
   console.log("🎯 Ready to serve requests!");
   
   // Start the server AFTER everything is initialized
-  app.listen(PORT, () => console.log(`✅ Backend running at http://localhost:${PORT}`));
+  const server = app.listen(PORT, () => {
+    console.log(`✅ Backend running at http://localhost:${PORT}`);
+    
+    // Start internal keep-alive mechanism (pings itself every 2 minutes)
+    startSelfKeepAlive();
+  });
   
   // Start checking for event live notifications every minute
   setInterval(checkEventLiveNotifications, 60000);
+}
+
+// Internal Keep-Alive Mechanism - Prevents backend from sleeping
+async function startSelfKeepAlive() {
+  console.log("💓 Starting internal keep-alive mechanism...");
+  
+  // Use localhost for internal pinging (works on both local and Render)
+  // This pings the server from within the same process to keep it alive
+  const KEEP_ALIVE_URL = `http://localhost:${PORT}/keepalive`;
+  
+  console.log(`💓 Keep-alive will ping: ${KEEP_ALIVE_URL}`);
+  
+  // Ping interval: Every 2 minutes (120000 ms) - safe for free tier (15 min timeout)
+  const KEEP_ALIVE_INTERVAL = 2 * 60 * 1000; // 2 minutes
+  
+  async function pingKeepAlive() {
+    try {
+      const url = KEEP_ALIVE_URL;
+      
+      // Create AbortController for timeout (5 seconds)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`💓 Self keep-alive ping successful: ${data.timestamp || new Date().toISOString()}`);
+      } else {
+        console.warn(`⚠️ Keep-alive ping returned status: ${response.status}`);
+      }
+    } catch (error) {
+      // Only log if it's not a connection error (which is expected on first start)
+      if (error.name !== 'AbortError' && error.code !== 'ECONNREFUSED' && error.code !== 'ENOTFOUND') {
+        console.error(`❌ Keep-alive ping error: ${error.message}`);
+      }
+    }
+  }
+  
+  // Start pinging after 10 seconds (give server time to fully start), then every 2 minutes
+  setTimeout(() => {
+    // First ping
+    pingKeepAlive();
+    
+    // Then set up interval for subsequent pings
+    setInterval(pingKeepAlive, KEEP_ALIVE_INTERVAL);
+    console.log(`✅ Keep-alive mechanism active - pinging every ${KEEP_ALIVE_INTERVAL / 1000} seconds`);
+  }, 10000); // Wait 10 seconds before starting keep-alive
 }
 
 // Check for events that just went live and notify waiting list users
