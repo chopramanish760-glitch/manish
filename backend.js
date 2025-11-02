@@ -1810,10 +1810,12 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
       ];
       uploadOptions.eager_async = false; // Process immediately for faster availability
       uploadOptions.invalidate = true; // Clear CDN cache for updated videos
+      uploadOptions.chunk_size = 6000000; // 6MB chunks for faster streaming
     } else {
-      // For images, optimize quality
+      // For images, optimize quality and format for faster upload
       uploadOptions.quality = 'auto';
       uploadOptions.fetch_format = 'auto';
+      uploadOptions.raw_convert = 'aspose'; // Faster conversion
     }
 
     // Upload to Cloudinary - use stream upload for better performance (especially for videos)
