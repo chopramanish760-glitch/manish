@@ -675,8 +675,8 @@ async function renderEvents() {
                             ? (isEventLive
                                 ? `<button class="btn" disabled style="border-color: var(--red-accent); color: var(--red-accent); opacity: 0.5;">Event Live - Venue Full</button>`
                                 : `<div style="display:flex; gap:8px; width:100%">
-                                       <button class="btn" disabled style="border-color: var(--red-accent); color: var(--red-accent); flex:1;">Venue Full</button>
-                                       <button class="btn" style="flex:1;" onclick="joinWaitlist(${e.id})">Join Waitlist</button>
+                                   <button class="btn" disabled style="border-color: var(--red-accent); color: var(--red-accent); flex:1;">Venue Full</button>
+                                   <button class="btn" style="flex:1;" onclick="joinWaitlist(${e.id})">Join Waitlist</button>
                                    </div>`)
                             : (isEventLive
                                 ? `<button class="btn" disabled style="opacity: 0.5;">Event Live - Cannot Book</button>`
@@ -1054,41 +1054,41 @@ async function doLogin() {
             
             console.log("📡 Login response:", res.status, res.statusText);
             
-            const data = await res.json();
+        const data = await res.json();
             console.log("📊 Login data:", data);
             
-            if (res.ok && data.ok) {
-                msg.textContent = "✅ Login successful! Redirecting...";
-                setTimeout(async () => {
-                    currentUser = data.user;
-                    
-                    // Check if "Remember Me" is checked
-                    const rememberMe = document.getElementById("rememberMe");
-                    if (rememberMe && rememberMe.checked) {
-                        saveUserSession(currentUser); // Save user session
-                    }
-                    
-                    await renderTickets(true); 
-                    // If arrived via QR (qr_e param), proceed to QR flow after login
-                    const params = new URLSearchParams(location.search);
-                    const qrEvent = params.get('qr_e');
-                    if (qrEvent) {
-                        // Show event details and a single QR book button
-                        try { await handleQrFlowAfterLogin(Number(qrEvent)); } catch {}
-                    }
-                    pollNotifications();
-                    notificationInterval = setInterval(pollNotifications, 5000);
-                    eventStateInterval = setInterval(checkEventStates, 30000);
-                    // Start event start notifications checker
-                    setInterval(checkEventStartNotifications, 60000); // Check every minute
-                    // Start live updates stream
-                    try { startLiveUpdates(); } catch (e) { console.warn('SSE unavailable', e); }
-                    renderTabs(); 
-                    showTab("home");
-                    
-                    // Welcome back banner
-                    showWelcomeBanner(`👋 Welcome back, ${data.user.name}!`);
-                }, 1000);
+        if (res.ok && data.ok) {
+            msg.textContent = "✅ Login successful! Redirecting...";
+            setTimeout(async () => {
+                currentUser = data.user;
+                
+                // Check if "Remember Me" is checked
+                const rememberMe = document.getElementById("rememberMe");
+                if (rememberMe && rememberMe.checked) {
+                    saveUserSession(currentUser); // Save user session
+                }
+                
+                await renderTickets(true); 
+                // If arrived via QR (qr_e param), proceed to QR flow after login
+                const params = new URLSearchParams(location.search);
+                const qrEvent = params.get('qr_e');
+                if (qrEvent) {
+                    // Show event details and a single QR book button
+                    try { await handleQrFlowAfterLogin(Number(qrEvent)); } catch {}
+                }
+                pollNotifications();
+                notificationInterval = setInterval(pollNotifications, 5000);
+                eventStateInterval = setInterval(checkEventStates, 30000);
+                // Start event start notifications checker
+                setInterval(checkEventStartNotifications, 60000); // Check every minute
+                // Start live updates stream
+                try { startLiveUpdates(); } catch (e) { console.warn('SSE unavailable', e); }
+                renderTabs(); 
+                showTab("home");
+                
+                // Welcome back banner
+                showWelcomeBanner(`👋 Welcome back, ${data.user.name}!`);
+            }, 1000);
         } else { 
             console.error("❌ Login failed:", data);
             msg.textContent = "❌ " + (data.error || "Login failed"); 
@@ -1186,52 +1186,52 @@ async function doSignup() {
             
             console.log("📡 Signup response:", res.status, res.statusText);
             
-            const data = await res.json();
+        const data = await res.json();
             console.log("📊 Signup data:", data);
             
-            if (res.ok && data.ok) {
-                if(user.role==='ORGANIZER'){
-                    // Organizer requests are saved as STUDENT with organizerStatus=PENDING.
-                    // Show centered 2s toast then auto-login and land on Home with Org tab disabled.
-                    showCenterToast('✅ Request sent to admin for verification');
-                    const pendingUser = data.user; // backend returns created user
-                    try{ currentUser = pendingUser; saveUserSession(currentUser); }catch{}
-                    renderTabs(); showTab('home');
-                    return;
-                }
-                msg.textContent = "✅ Account created! Signing you in...";
-                setTimeout(async () => {
-                    // Auto-login the newly created user
-                    try {
-                        const loginRes = await fetch(API + "/login", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ regNumber: user.regNumber, password: user.password })
-                        });
-                        const loginData = await loginRes.json();
-                        
-                        if (loginRes.ok && loginData.ok) {
-                            currentUser = loginData.user;
-                            saveUserSession(currentUser); // Auto-save session for new users
-                            await renderTickets(true);
-                            pollNotifications();
-                            notificationInterval = setInterval(pollNotifications, 5000);
-                            eventStateInterval = setInterval(checkEventStates, 30000);
-                            // Start event start notifications checker
-                            setInterval(checkEventStartNotifications, 60000); // Check every minute
-                            renderTabs();
-                            showTab("home");
-                            // Welcome banner for new signup
-                            showWelcomeBanner(`🎉 Welcome, ${user.name}!`);
-                        } else {
-                            // Fallback to login screen if auto-login fails
-                            showLogin();
-                        }
-                    } catch (error) {
+        if (res.ok && data.ok) {
+            if(user.role==='ORGANIZER'){
+                // Organizer requests are saved as STUDENT with organizerStatus=PENDING.
+                // Show centered 2s toast then auto-login and land on Home with Org tab disabled.
+                showCenterToast('✅ Request sent to admin for verification');
+                const pendingUser = data.user; // backend returns created user
+                try{ currentUser = pendingUser; saveUserSession(currentUser); }catch{}
+                renderTabs(); showTab('home');
+                return;
+            }
+            msg.textContent = "✅ Account created! Signing you in...";
+            setTimeout(async () => {
+                // Auto-login the newly created user
+                try {
+                    const loginRes = await fetch(API + "/login", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ regNumber: user.regNumber, password: user.password })
+                    });
+                    const loginData = await loginRes.json();
+                    
+                    if (loginRes.ok && loginData.ok) {
+                        currentUser = loginData.user;
+                        saveUserSession(currentUser); // Auto-save session for new users
+                        await renderTickets(true);
+                        pollNotifications();
+                        notificationInterval = setInterval(pollNotifications, 5000);
+                        eventStateInterval = setInterval(checkEventStates, 30000);
+                        // Start event start notifications checker
+                        setInterval(checkEventStartNotifications, 60000); // Check every minute
+                        renderTabs();
+                        showTab("home");
+                        // Welcome banner for new signup
+                        showWelcomeBanner(`🎉 Welcome, ${user.name}!`);
+                    } else {
                         // Fallback to login screen if auto-login fails
                         showLogin();
                     }
-                }, 2000);
+                } catch (error) {
+                    // Fallback to login screen if auto-login fails
+                    showLogin();
+                }
+            }, 2000);
         } else { 
             console.error("❌ Signup failed:", data);
             msg.textContent = "❌ " + (data.error || "Signup failed"); 
