@@ -432,7 +432,7 @@ function checkSavedLogin() {
         showTab("home");
         renderTickets(true);
         pollNotifications();
-        notificationInterval = setInterval(pollNotifications, 5000);
+        notificationInterval = setInterval(pollNotifications, 3000); // Poll every 3 seconds for faster feedback notification delivery
         eventStateInterval = setInterval(checkEventStates, 30000);
         // Start event start notifications checker
         setInterval(checkEventStartNotifications, 60000); // Check every minute
@@ -853,7 +853,7 @@ async function renderEvents() {
     });
     
     // Categorize events: past events have ended (end time < now), upcoming/live events haven't ended (end time >= now)
-    const now = new Date();
+    // Reuse 'now' from above - no need to redeclare
     const upcomingEvents = filteredEvents.filter(e => {
         const startTime = parseEventDateTime(e.date, e.time);
         const duration = e.duration || 0; // Default to 0 if duration not set
@@ -914,6 +914,25 @@ async function renderEvents() {
                 const div = document.createElement("div"); div.className = "card";
                 const isEventLive = now >= startTime && now < endTime;
                 const statusElementId = `countdown-${e.id}`;
+                
+                // Format end time for display
+                const endTimeFormatted = endTime.toLocaleTimeString('en-IN', { 
+                    hour: '2-digit', 
+                    minute: '2-digit',
+                    hour12: true 
+                });
+                
+                // For live events, show end time instead of seats/availability
+                let seatsAndAvailabilityHtml = '';
+                if (isEventLive) {
+                    seatsAndAvailabilityHtml = `
+                        <b>Event Ends At:</b> <span class="value" style="color:#10b981; font-weight:bold;">${endTimeFormatted}</span>`;
+                } else {
+                    seatsAndAvailabilityHtml = `
+                        <b>Seats:</b> <span class="value">${e.taken}/${e.capacity}</span>
+                        <b>Availability:</b> <span class="value" style="color:${isFull ? '#ef4444' : '#10b981'}">${isFull ? 'Venue Full' : 'Available'}</span>`;
+                }
+                
                 div.innerHTML = `
                     <div class="category-badge">${e.category}</div>
                     <b style="font-size:1.05rem;color:#93c5fd;">${capitalizeWords(e.title)}</b>
@@ -921,8 +940,7 @@ async function renderEvents() {
                         <b>Venue:</b> <span class="value">${capitalizeWords(e.venue)}</span>
                         <b>Date:</b> <span class="value">${e.date}</span>
                         <b>Time:</b> <span class="value">${e.time}</span>
-                        <b>Seats:</b> <span class="value">${e.taken}/${e.capacity}</span>
-                        <b>Availability:</b> <span class="value" style="color:${isFull ? '#ef4444' : '#10b981'}">${isFull ? 'Venue Full' : 'Available'}</span>
+                        ${seatsAndAvailabilityHtml}
                         <b>Status:</b> <span class="value" id="${statusElementId}" data-start-time="${startTime.toISOString()}"></span>
                     </div>`;
                 const chatButton = (isBooked || isVolunteer || isOnWaitlist) ? `<button class="btn" onclick="openEventChat(${e.id}, '${e.title}', '${e.creatorRegNumber}')">💬 Chat</button>` : '';
@@ -1016,27 +1034,35 @@ async function renderMedia() {
                     mediaUrl = m.url.startsWith('/') ? `${API_BASE}${m.url}` : `${API_BASE}/${m.url}`;
                 }
                 if (m.type === "photo") {
-                    // Optimize image URL for faster loading with lazy loading
-                    let optimizedImgUrl = mediaUrl;
-                    if (mediaUrl && mediaUrl.includes('cloudinary.com')) {
-                        if (!mediaUrl.includes('/q_') && !mediaUrl.includes('/f_')) {
-                            optimizedImgUrl = mediaUrl.replace(/(\/v\d+\/)(.+)/, '$1q_auto,f_auto,w_400,h_300,c_fill/$2');
+                    // Use thumbnail URL if available, otherwise use optimized image URL
+                    let imgUrl = m.thumbnailUrl || mediaUrl;
+                    if (!imgUrl || !imgUrl.includes('cloudinary.com')) {
+                        // Fallback: generate thumbnail URL
+                        if (mediaUrl && mediaUrl.includes('cloudinary.com')) {
+                            if (!mediaUrl.includes('/q_') && !mediaUrl.includes('/f_')) {
+                                imgUrl = mediaUrl.replace(/(\/v\d+\/)(.+)/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2');
+                            } else {
+                                imgUrl = mediaUrl;
+                            }
+                        } else {
+                            imgUrl = mediaUrl;
                         }
                     }
-                    sectionHtml += `<div class="media-item"><img loading="lazy" decoding="async" src="${optimizedImgUrl}" onclick="showLightbox('${m.url || m._id}', 'photo')" style="width:100%; height:120px; object-fit:cover; cursor:pointer;"></div>`;
+                    sectionHtml += `<div class="media-item"><img loading="lazy" decoding="async" src="${imgUrl}" onclick="showLightbox('${m.url || m._id}', 'photo')" style="width:100%; height:120px; object-fit:cover; cursor:pointer;" onerror="this.src='${mediaUrl}'"></div>`;
                 }
                 if (m.type === "video") {
-                    // Optimize Cloudinary video URL for faster streaming with thumbnail
+                    // Use stored thumbnail URL if available, otherwise generate one
+                    let thumbnailUrl = m.thumbnailUrl || '';
                     let optimizedVideoUrl = mediaUrl;
-                    let thumbnailUrl = '';
-                    if (mediaUrl && mediaUrl.includes('cloudinary.com')) {
-                        // Generate thumbnail for faster preview
+                    
+                    if (!thumbnailUrl && mediaUrl && mediaUrl.includes('cloudinary.com')) {
+                        // Fallback: generate thumbnail URL from video URL
                         thumbnailUrl = mediaUrl.replace(/(\/v\d+\/)(.+)(\.(mp4|webm|ogg))/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2.jpg');
-                        // Add streaming optimizations for actual video
-                        if (!mediaUrl.includes('/q_')) {
-                            optimizedVideoUrl = mediaUrl.replace(/\.(mp4|webm|ogg)/, '/q_auto,f_auto,vc_auto,ac_auto,fl_progressive.$1');
-                        }
                     }
+                    
+                    // Use the video URL directly (already optimized from backend)
+                    optimizedVideoUrl = mediaUrl;
+                    
                     sectionHtml += `<div class="media-item" onclick="showLightbox('${m.url || m._id}', 'video')"><video poster="${thumbnailUrl || ''}" src="${optimizedVideoUrl}" preload="none" loading="lazy" playsinline webkit-playsinline style="width:100%; height:100%; object-fit:cover; cursor:pointer;"></video><div class="play-overlay"><div class="play-icon">▶</div></div></div>`;
                 }
             });
@@ -1304,18 +1330,115 @@ function showSignup() {
         </span>
     </div>
     <select id="role"><option>STUDENT</option><option>ORGANIZER</option></select>
+    <div style="border-top: 1px solid var(--border); margin: 16px 0; padding-top: 16px;">
+        <h4 style="margin-bottom: 8px;">OTP Verification (Required)</h4>
+        <input id="otpCode" placeholder="Enter 6-digit OTP" maxlength="6" style="margin-bottom: 8px;">
+        <button class="btn" onclick="requestSignupOTP()" style="background: #10b981; border-color: #10b981; margin-bottom: 8px;">📱 Send OTP</button>
+        <div id="otpMsg" class="muted" style="font-size: 0.9rem;"></div>
+    </div>
     <button class="btn primary" onclick="doSignup()">Sign Up</button>
     <button class="btn" onclick="showLogin()">Cancel</button>
     <div id="signupMsg" class="muted"></div>`;
     showTab('signup');
 }
+let resetOTPVerified = false;
+
+async function requestResetOTP() {
+    const regNumber = String(document.getElementById("resetReg").value||'').trim();
+    const resetOtpMsg = document.getElementById("resetOtpMsg");
+    
+    if (!regNumber) {
+        resetOtpMsg.textContent = "❌ Please enter registration number first";
+        resetOtpMsg.style.color = "#ef4444";
+        return;
+    }
+    
+    resetOtpMsg.textContent = "⏳ Sending OTP...";
+    resetOtpMsg.style.color = "var(--text-secondary)";
+    
+    try {
+        const res = await fetch(API + "/otp/request-reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ regNumber })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.ok) {
+            let msg = "✅ OTP sent";
+            if (data.maskedPhone) {
+                msg += ` on ${data.maskedPhone}`;
+            } else if (data.email) {
+                msg += ` to ${data.email}`;
+            }
+            msg += ". (For testing, check console)";
+            resetOtpMsg.textContent = msg;
+            resetOtpMsg.style.color = "#10b981";
+            
+            // Auto-verify if OTP is already entered
+            const otpCode = document.getElementById("resetOtpCode").value.trim();
+            if (otpCode && otpCode.length === 6) {
+                await verifyResetOTP();
+            }
+        } else {
+            resetOtpMsg.textContent = "❌ " + (data.error || "Failed to send OTP");
+            resetOtpMsg.style.color = "#ef4444";
+        }
+    } catch (err) {
+        resetOtpMsg.textContent = "❌ Network error";
+        resetOtpMsg.style.color = "#ef4444";
+    }
+}
+
+async function verifyResetOTP() {
+    const regNumber = String(document.getElementById("resetReg").value||'').trim();
+    const code = document.getElementById("resetOtpCode").value.trim();
+    const resetOtpMsg = document.getElementById("resetOtpMsg");
+    
+    if (!code || code.length !== 6) {
+        resetOtpMsg.textContent = "❌ Please enter 6-digit OTP";
+        resetOtpMsg.style.color = "#ef4444";
+        return;
+    }
+    
+    try {
+        const res = await fetch(API + "/otp/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ regNumber, code, purpose: 'reset' })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.ok) {
+            resetOTPVerified = true;
+            resetOtpMsg.textContent = "✅ OTP verified!";
+            resetOtpMsg.style.color = "#10b981";
+        } else {
+            resetOTPVerified = false;
+            resetOtpMsg.textContent = "❌ " + (data.error || "Invalid OTP");
+            resetOtpMsg.style.color = "#ef4444";
+        }
+    } catch (err) {
+        resetOtpMsg.textContent = "❌ Network error";
+        resetOtpMsg.style.color = "#ef4444";
+    }
+}
+
 function showForgotPassword() {
+    resetOTPVerified = false;
     const s = document.getElementById("screen-login");
     s.innerHTML = `
     <div>
         <h2 style="font-size: 2rem;">Forgot Password</h2>
         <input id="resetReg" placeholder="Registration Number">
-        <select id="resetRole"><option>STUDENT</option><option>ORGANIZER</option></select>
+        <div style="border-top: 1px solid var(--border); margin: 16px 0; padding-top: 16px;">
+            <h4 style="margin-bottom: 8px;">OTP Verification (Required)</h4>
+            <input id="resetOtpCode" placeholder="Enter 6-digit OTP" maxlength="6" style="margin-bottom: 8px;">
+            <button class="btn" onclick="requestResetOTP()" style="background: #10b981; border-color: #10b981; margin-bottom: 8px;">📱 Send OTP</button>
+            <div id="resetOtpMsg" class="muted" style="font-size: 0.9rem;"></div>
+        </div>
         <div class="password-wrapper">
             <input id="newPassword" type="password" placeholder="New Password">
             <span class="password-toggle" onclick="togglePasswordVisibility('newPassword')">
@@ -1339,6 +1462,18 @@ function showForgotPassword() {
         <div id="resetMsg" class="muted"></div>
     </div>`;
     showTab('login');
+    
+    // Attach auto-verify listener
+    setTimeout(() => {
+        const otpInput = document.getElementById("resetOtpCode");
+        if (otpInput) {
+            otpInput.addEventListener('input', (e) => {
+                if (e.target.value.length === 6) {
+                    verifyResetOTP();
+                }
+            });
+        }
+    }, 100);
 }
 async function doLogin() {
     const regNumber = String(document.getElementById("loginReg").value||'').trim(); 
@@ -1380,7 +1515,7 @@ async function doLogin() {
                     try { await handleQrFlowAfterLogin(Number(qrEvent)); } catch {}
                 }
                 pollNotifications();
-                notificationInterval = setInterval(pollNotifications, 5000);
+                notificationInterval = setInterval(pollNotifications, 3000); // Poll every 3 seconds for faster feedback notification delivery
                 eventStateInterval = setInterval(checkEventStates, 30000);
                 // Start event start notifications checker
                 setInterval(checkEventStartNotifications, 60000); // Check every minute
@@ -1461,8 +1596,141 @@ function startLiveUpdates(){
             }
         }catch{ refresh(); }
     });
+    
+    // Listen for notification changes (including feedback notifications)
+    es.addEventListener('notifications_changed', (e)=>{
+        try{
+            const data = JSON.parse(e.data||'{}');
+            if(currentUser && data && data.regNumber === currentUser.regNumber){
+                // Immediately poll notifications to get the latest ones
+                pollNotifications();
+                // Also refresh current screen if needed
+                const currentScreen = document.querySelector('.content[style*="block"]');
+                if(currentScreen && currentScreen.id === 'screen-notifications'){
+                    renderNotifications();
+                }
+            }
+        }catch(err){
+            // If notification received but parsing failed, still poll for updates
+            pollNotifications();
+        }
+    });
+    
     es.onerror = () => { try{ es.close(); }catch{}; __eventSource=null; setTimeout(()=>{ try{ startLiveUpdates(); }catch{} }, 5000); };
 }
+let signupOTPVerified = false;
+
+async function requestSignupOTP() {
+    const email = String(document.getElementById("email").value||'').trim();
+    const phone = String(document.getElementById("phone").value||'').trim();
+    const otpMsg = document.getElementById("otpMsg");
+    
+    if (!email || !phone) {
+        otpMsg.textContent = "❌ Please enter email and phone first";
+        otpMsg.style.color = "#ef4444";
+        return;
+    }
+    
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        otpMsg.textContent = "❌ Invalid email format";
+        otpMsg.style.color = "#ef4444";
+        return;
+    }
+    
+    if (!/^\d{10}$/.test(phone)) {
+        otpMsg.textContent = "❌ Phone must be 10 digits";
+        otpMsg.style.color = "#ef4444";
+        return;
+    }
+    
+    otpMsg.textContent = "⏳ Sending OTP...";
+    otpMsg.style.color = "var(--text-secondary)";
+    
+    try {
+        const res = await fetch(API + "/otp/request-signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone, email })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.ok) {
+            let msg = "✅ OTP sent";
+            if (data.maskedPhone) {
+                msg += ` on ${data.maskedPhone}`;
+            } else if (data.email) {
+                msg += ` to ${data.email}`;
+            }
+            msg += ". (For testing, check console)";
+            otpMsg.textContent = msg;
+            otpMsg.style.color = "#10b981";
+            
+            // Verify OTP automatically after sending (for testing - in production, user enters manually)
+            const otpCode = document.getElementById("otpCode").value.trim();
+            if (otpCode && otpCode.length === 6) {
+                await verifySignupOTP();
+            }
+        } else {
+            otpMsg.textContent = "❌ " + (data.error || "Failed to send OTP");
+            otpMsg.style.color = "#ef4444";
+        }
+    } catch (err) {
+        otpMsg.textContent = "❌ Network error";
+        otpMsg.style.color = "#ef4444";
+    }
+}
+
+async function verifySignupOTP() {
+    const phone = String(document.getElementById("phone").value||'').trim();
+    const code = document.getElementById("otpCode").value.trim();
+    const otpMsg = document.getElementById("otpMsg");
+    
+    if (!code || code.length !== 6) {
+        otpMsg.textContent = "❌ Please enter 6-digit OTP";
+        otpMsg.style.color = "#ef4444";
+        return;
+    }
+    
+    try {
+        const res = await fetch(API + "/otp/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone, code, purpose: 'signup' })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.ok) {
+            signupOTPVerified = true;
+            otpMsg.textContent = "✅ OTP verified!";
+            otpMsg.style.color = "#10b981";
+        } else {
+            signupOTPVerified = false;
+            otpMsg.textContent = "❌ " + (data.error || "Invalid OTP");
+            otpMsg.style.color = "#ef4444";
+        }
+    } catch (err) {
+        otpMsg.textContent = "❌ Network error";
+        otpMsg.style.color = "#ef4444";
+    }
+}
+
+// Auto-verify OTP when user enters it
+document.addEventListener('DOMContentLoaded', () => {
+    // This will be attached after showSignup() is called
+    setTimeout(() => {
+        const otpInput = document.getElementById("otpCode");
+        if (otpInput) {
+            otpInput.addEventListener('input', (e) => {
+                if (e.target.value.length === 6) {
+                    verifySignupOTP();
+                }
+            });
+        }
+    }, 100);
+});
+
 async function doSignup() {
     const user = { 
         name: capitalizeWords(document.getElementById("name").value), 
@@ -1473,10 +1741,19 @@ async function doSignup() {
         phone: String(document.getElementById("phone").value||'').trim(), 
         regNumber: String(document.getElementById("regNumber").value||'').trim(), 
         password: document.getElementById("password").value, 
-        role: document.getElementById("role").value 
+        role: document.getElementById("role").value,
+        otpCode: String(document.getElementById("otpCode").value||'').trim()
     };
     const msg = document.getElementById("signupMsg"); 
+    
+    if (!signupOTPVerified && !user.otpCode) {
+        msg.textContent = "❌ Please verify OTP first";
+        msg.style.color = "#ef4444";
+        return;
+    }
+    
     msg.textContent = "⏳ Signing up...";
+    msg.style.color = "var(--text-secondary)";
     
     console.log("🔍 Signup attempt:", { regNumber: user.regNumber, API_BASE, API });
     
@@ -1518,7 +1795,7 @@ async function doSignup() {
                         saveUserSession(currentUser); // Auto-save session for new users
                         await renderTickets(true);
                         pollNotifications();
-                        notificationInterval = setInterval(pollNotifications, 5000);
+                        notificationInterval = setInterval(pollNotifications, 3000); // Poll every 3 seconds for faster feedback notification delivery
                         eventStateInterval = setInterval(checkEventStates, 30000);
                         // Start event start notifications checker
                         setInterval(checkEventStartNotifications, 60000); // Check every minute
@@ -1544,7 +1821,56 @@ async function doSignup() {
         msg.textContent = "❌ Network error - check console for details"; 
     }
 }
-async function doResetPassword() { const e = document.getElementById("resetReg").value, t = document.getElementById("resetRole").value, n = document.getElementById("newPassword").value, c = document.getElementById("confirmNewPassword").value, a = document.getElementById("resetMsg"); if(n!==c){ a.textContent = "❌ Passwords do not match"; return;} if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/.test(n)) return void (a.textContent = "❌ Password must contain uppercase, lowercase, number and be at least 6 characters long"); a.textContent = "⏳ Resetting password..."; try { const i = await fetch(API + "/reset-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ regNumber: e, role: t, newPassword: n }) }), o = await i.json(); i.ok && o.ok ? (a.textContent = "✅ Password changed successfully! Redirecting...", setTimeout(showLogin, 1000)) : a.textContent = "❌ " + (o.error || "Password reset failed.") } catch { a.textContent = "❌ Network error" } }
+async function doResetPassword() {
+    const regNumber = String(document.getElementById("resetReg").value||'').trim();
+    const newPassword = document.getElementById("newPassword").value;
+    const confirmPassword = document.getElementById("confirmNewPassword").value;
+    const otpCode = String(document.getElementById("resetOtpCode").value||'').trim();
+    const msg = document.getElementById("resetMsg");
+    
+    if (newPassword !== confirmPassword) {
+        msg.textContent = "❌ Passwords do not match";
+        msg.style.color = "#ef4444";
+        return;
+    }
+    
+    if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/.test(newPassword)) {
+        msg.textContent = "❌ Password must contain uppercase, lowercase, number and be at least 6 characters long";
+        msg.style.color = "#ef4444";
+        return;
+    }
+    
+    if (!resetOTPVerified && !otpCode) {
+        msg.textContent = "❌ Please verify OTP first";
+        msg.style.color = "#ef4444";
+        return;
+    }
+    
+    msg.textContent = "⏳ Resetting password...";
+    msg.style.color = "var(--text-secondary)";
+    
+    try {
+        const res = await fetch(API + "/reset-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ regNumber, newPassword, otpCode })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.ok) {
+            msg.textContent = "✅ Password changed successfully! Redirecting...";
+            msg.style.color = "#10b981";
+            setTimeout(showLogin, 1000);
+        } else {
+            msg.textContent = "❌ " + (data.error || "Password reset failed.");
+            msg.style.color = "#ef4444";
+        }
+    } catch (err) {
+        msg.textContent = "❌ Network error";
+        msg.style.color = "#ef4444";
+    }
+}
 function togglePasswordVisibility(e) { const t = document.getElementById(e), n = t.nextElementSibling, a = n.querySelectorAll(".eye-open-path"), i = n.querySelectorAll(".eye-closed-path"); "password" === t.type ? (t.type = "text", a.forEach(e => e.style.display = "none"), i.forEach(e => e.style.display = "block")) : (t.type = "password", a.forEach(e => e.style.display = "block"), i.forEach(e => e.style.display = "none")) }
 
 // ---------- Tickets ----------
@@ -1935,6 +2261,22 @@ async function renderOrganizer(){
             let status = "upcoming";
             if (now >= startTime && now < endTime) status = "live";
             else if (now >= endTime) status = "past";
+            
+            // Format end time for display
+            const endTimeFormatted = endTime.toLocaleTimeString('en-IN', { 
+                hour: '2-digit', 
+                minute: '2-digit',
+                hour12: true 
+            });
+            
+            // For live events, show end time instead of seats (organizers might still need seats, but show end time prominently)
+            let seatsHtml = '';
+            if (status === "live") {
+                seatsHtml = `<b>Event Ends At:</b> <span class="value" style="color:#10b981; font-weight:bold;">${endTimeFormatted}</span><b>Seats:</b> <span class="value">${e.taken}/${e.capacity}</span>`;
+            } else {
+                seatsHtml = `<b>Seats:</b> <span class="value">${e.taken}/${e.capacity}</span>`;
+            }
+            
             div.innerHTML = `
                 <div class="category-badge">${e.category || 'General'}</div>
                 <div class="info-dot" title="Event Info" onclick="openOrganizerEventInfoById(${e.id})">i</div>
@@ -1943,7 +2285,7 @@ async function renderOrganizer(){
                     <b>Venue:</b> <span class="value">${capitalizeWords(e.venue)}</span>
                     <b>Date:</b> <span class="value">${e.date}</span>
                     <b>Time:</b> <span class="value">${e.time}</span>
-                    <b>Seats:</b> <span class="value">${e.taken}/${e.capacity}</span>
+                    ${seatsHtml}
                 </div>`;
             let buttons = `<button class="btn" onclick="showEventBookings(${e.id})">View Bookings</button><button class="btn" onclick='showEventIdCard(${JSON.stringify(e)})'>💳 View Event ID</button><button class="btn" onclick='openOrganizerMessages(${e.id})'>💬 Messages</button><button class="btn" onclick='openWaitlistModal(${e.id}, "${e.title.replace(/"/g,'&quot;')}")'>🕒 Waitlist</button>`;
             buttons += `<button class="btn" onclick='openVolunteersModal(${e.id}, "${e.title.replace(/"/g,'&quot;')}")'>🤝 Volunteers</button>`;
@@ -3953,16 +4295,41 @@ async function openExternalNavFromMap(){
 async function resolveVenueLatLng(venue){
     // Expanded precise location dictionary for NITK venues
     const dict = {
-        'LH-C': {lat:13.00898,lng:74.79397}, 'LH-D': {lat:13.00970,lng:74.79346},
-        'LH-A': {lat:13.00949,lng:74.79397}, 'LHB (MB)': {lat:13.01112,lng:74.79442},
-        'SJA': {lat:13.00939,lng:74.79506}, 'MAIN BUILDING': {lat:13.01112,lng:74.79442},
-        'SEMINAR HALL A (MB)': {lat:13.01113,lng:74.79428}, 'SEMINAR HALL B (MB)': {lat:13.01113,lng:74.79428},
-        'SEMINAR HALL C (MB)': {lat:13.01113,lng:74.79428}, 'OPEN THEATER': {lat:13.01083,lng:74.79695},
-        'NEW SPORTS COMPLEX': {lat:13.01006,lng:74.79830}, 'MAIN GROUND': {lat:13.01015,lng:74.79755},
-        'NITK BEACH': {lat:13.00981,lng:74.78811}, 'CRF': {lat:13.00933,lng:74.79539}, 'GYM': {lat:13.00720,lng:74.79482},
+        // Lecture Halls (LH)
+        'LH-C': {lat:13.00898,lng:74.79397}, 
+        'LH-D': {lat:13.00970,lng:74.79346},
+        'LH-A': {lat:13.00949,lng:74.79397}, 
+        'LHB (MB)': {lat:13.01112,lng:74.79442},
+        
+        // Silver Jubilee Auditorium (SJA) - Exact location verified
+        'SJA': {lat:13.01083,lng:74.79695}, 
+        'SILVER JUBILEE AUDITORIUM': {lat:13.01083,lng:74.79695},
+        'SILVER JUBILEE STADIUM': {lat:13.01083,lng:74.79695},
+        
+        // Main Building and Seminar Halls
+        'MAIN BUILDING': {lat:13.01112,lng:74.79442},
+        'SEMINAR HALL A (MB)': {lat:13.01113,lng:74.79428}, 
+        'SEMINAR HALL B (MB)': {lat:13.01113,lng:74.79428},
+        'SEMINAR HALL C (MB)': {lat:13.01113,lng:74.79428}, 
+        
+        // Outdoor venues
+        'OPEN THEATER': {lat:13.01083,lng:74.79695}, // Same as SJA (adjacent location)
+        'NEW SPORTS COMPLEX': {lat:13.01006,lng:74.79830}, 
+        'MAIN GROUND': {lat:13.01015,lng:74.79755},
+        
+        // Central Research Facility (CRF) - Exact location verified
+        'CRF': {lat:13.00933,lng:74.79539}, 
+        'CENTRAL RESEARCH FACILITY': {lat:13.00933,lng:74.79539},
+        
+        // Other facilities
+        'GYM': {lat:13.00720,lng:74.79482},
+        'NITK BEACH': {lat:13.00981,lng:74.78811},
+        
         // Additional common venues with precise coordinates
-        'LIBRARY': {lat:13.01056,lng:74.79501}, 'HOSTEL': {lat:13.00845,lng:74.79589},
-        'CANTEEN': {lat:13.00989,lng:74.79495}, 'AUDITORIUM': {lat:13.01105,lng:74.79435}
+        'LIBRARY': {lat:13.01056,lng:74.79501}, 
+        'HOSTEL': {lat:13.00845,lng:74.79589},
+        'CANTEEN': {lat:13.00989,lng:74.79495}, 
+        'AUDITORIUM': {lat:13.01105,lng:74.79435}
     };
     
     // Try exact match first
@@ -4451,7 +4818,7 @@ async function renderAdminEvents(){
                 <b>Date:</b> <span class="value">${e.date}</span>
                 <b>Time:</b> <span class="value">${e.time}</span>
                 <b>Venue:</b> <span class="value">${capitalizeWords(e.venue)}</span>
-                <b>Capacity:</b> <span class="value">${e.taken || 0}/${e.capacity}</span>
+                ${status === 'live' ? `<b>Event Ends At:</b> <span class="value" style="color: ${statusColor}; font-weight: bold;">${endTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}</span>` : `<b>Capacity:</b> <span class="value">${e.taken || 0}/${e.capacity}</span>`}
                 <b>Duration:</b> <span class="value">${e.duration || 0} min</span>
                 <b>Status:</b> <span class="value" style="color: ${statusColor}; font-weight: bold;">${statusText}</span>
               </div>
@@ -4984,9 +5351,6 @@ function initializeApp() {
     try {
         console.log("🚀 Initializing Campus Event Hub...");
         
-        // Start keep-alive immediately on page load
-        startKeepAlive();
-        
         // Ensure API_BASE is defined
         if (typeof API_BASE === 'undefined') {
             console.error("❌ API_BASE not defined, retrying in 100ms...");
@@ -5001,6 +5365,17 @@ function initializeApp() {
             return;
         }
         
+        // Start keep-alive if function is available
+        if (typeof startKeepAlive === 'function') {
+            try {
+                startKeepAlive();
+            } catch (err) {
+                console.warn('⚠️ Could not start keep-alive:', err.message);
+            }
+        } else {
+            console.warn('⚠️ startKeepAlive function not available yet');
+        }
+        
         // Check if user is already logged in
         const savedUser = loadUserSession();
         if (savedUser) {
@@ -5010,7 +5385,7 @@ function initializeApp() {
             showTab("home");
             // Start background processes
             try { pollNotifications(); } catch {}
-            try { notificationInterval = setInterval(pollNotifications, 5000); } catch {}
+            try { notificationInterval = setInterval(pollNotifications, 3000); } catch {} // Poll every 3 seconds for faster feedback notification delivery
             try { eventStateInterval = setInterval(checkEventStates, 30000); } catch {}
             try { startLiveUpdates(); } catch {}
         } else {
@@ -5030,11 +5405,22 @@ function initializeApp() {
     }
 }
 
-// Run initialization when DOM is ready
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initializeApp);
-} else {
+// Run initialization when DOM is ready and all scripts are loaded
+function runInitialization() {
+    // Wait a tiny bit to ensure all script blocks have parsed
+    if (typeof API_BASE === 'undefined' || typeof showLogin === 'undefined') {
+        setTimeout(runInitialization, 50);
+        return;
+    }
     initializeApp();
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        setTimeout(runInitialization, 100);
+    });
+} else {
+    setTimeout(runInitialization, 100);
 }
 
 // Center toast for short messages

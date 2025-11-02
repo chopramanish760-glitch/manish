@@ -293,8 +293,9 @@ async function initializeApp() {
   // Start checking for event live notifications every minute
   setInterval(checkEventLiveNotifications, 60000);
   
-  // Start checking for completed events to send feedback notifications every minute
-  setInterval(checkCompletedEventsForFeedback, 60000);
+  // Start checking for completed events to send feedback notifications every 30 seconds for precision
+  // This ensures notifications are sent within ~1 minute of event ending (checks every 30s, sends at 1-1.5 min window)
+  setInterval(checkCompletedEventsForFeedback, 30000);
 }
 
 // Internal Keep-Alive Mechanism - Prevents backend from sleeping
@@ -459,11 +460,12 @@ async function checkCompletedEventsForFeedback() {
       // Check if event has completed (end time is in the past)
       const timeSinceEnd = now.getTime() - eventEnd.getTime();
       
-      // Send notifications if event completed (any time in the past, not just last 10 minutes)
-      // But only if it's been at least 1 minute since event ended (give it time to finish)
+      // Send notifications exactly 1 minute after event ends (with 30 second window for polling precision)
       const oneMinute = 1 * 60 * 1000;
+      const oneMinuteThirtySeconds = 1.5 * 60 * 1000;
       
-      if (timeSinceEnd >= oneMinute) {
+      // Send notification if event ended between 1 minute and 1.5 minutes ago (to catch it precisely)
+      if (timeSinceEnd >= oneMinute && timeSinceEnd <= oneMinuteThirtySeconds) {
         // Send feedback request notifications to all booked users
         let notificationCount = 0;
         for (const booking of event.bookings) {
@@ -486,6 +488,15 @@ async function checkCompletedEventsForFeedback() {
         // Mark that we've sent feedback notifications for this event
         data.eventNotifications[feedbackNotificationKey] = true;
         await saveData(data);
+        
+        // Broadcast notification updates via SSE so frontend receives them automatically
+        try {
+          for (const booking of event.bookings) {
+            broadcast('notifications_changed', { regNumber: booking.regNumber, reason: 'feedback_request', eventId: event.id });
+          }
+        } catch (err) {
+          console.warn('Could not broadcast notification update:', err);
+        }
         
         console.log(`📝 Sent feedback request notifications to ${notificationCount} booked users for completed event: ${event.title} (ended ${Math.round(timeSinceEnd / 60000)} minutes ago)`);
       }
@@ -617,6 +628,149 @@ function broadcast(eventName, data, targetReg) {
   });
 }
 
+// In-memory OTP storage (in production, use Redis or database)
+const otpStore = new Map(); // Key: phone/email, Value: {code, expiresAt, purpose}
+
+// Generate 6-digit OTP
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// Clean expired OTPs
+function cleanExpiredOTPs() {
+  const now = Date.now();
+  for (const [key, value] of otpStore.entries()) {
+    if (value.expiresAt < now) {
+      otpStore.delete(key);
+    }
+  }
+}
+
+// Mask phone number - show only last 4 digits
+function maskPhoneNumber(phone) {
+  if (!phone || phone.length < 4) return 'xxxxxx';
+  const last4 = phone.slice(-4);
+  return 'xxxxxx' + last4;
+}
+
+// Send OTP via phone/email (simulated - in production use SMS/Email service)
+function sendOTP(phone, email, code) {
+  if (phone) {
+    const masked = maskPhoneNumber(phone);
+    console.log(`📱 OTP sent to ${masked}: ${code}`);
+    // In production, integrate with SMS service (Twilio, AWS SNS) or Email service (SendGrid, AWS SES)
+    // Example: await twilioClient.messages.create({ to: phone, body: `Your OTP is: ${code}` });
+  } else if (email) {
+    console.log(`📧 OTP sent to ${email}: ${code}`);
+    // In production: await sendEmail({ to: email, subject: 'Your OTP', body: `Your OTP is: ${code}` });
+  }
+  return { phone: phone ? maskPhoneNumber(phone) : null, email };
+}
+
+// Request OTP for signup
+app.post("/api/otp/request-signup", async (req, res) => {
+  try {
+    const { phone, email } = req.body;
+    if (!phone || !email) {
+      return res.status(400).json({ ok: false, error: "Phone and email are required" });
+    }
+    
+    const data = await loadData();
+    // Check if already registered
+    if (data.users.find(u => u.phone === phone)) {
+      return res.status(400).json({ ok: false, error: "Phone number already registered" });
+    }
+    if (data.users.find(u => (u.email||'').toLowerCase() === String(email).toLowerCase())) {
+      return res.status(400).json({ ok: false, error: "Email already registered" });
+    }
+    
+    cleanExpiredOTPs();
+    const code = generateOTP();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+    
+    otpStore.set(`signup_${phone}`, { code, expiresAt, purpose: 'signup', phone, email });
+    
+    const sendResult = sendOTP(phone, email, code);
+    
+    return res.json({ 
+      ok: true, 
+      message: "OTP sent successfully",
+      maskedPhone: sendResult.phone || null,
+      email: email ? email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null // Mask email partially
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Request OTP for password reset
+app.post("/api/otp/request-reset", async (req, res) => {
+  try {
+    const { regNumber } = req.body;
+    if (!regNumber) {
+      return res.status(400).json({ ok: false, error: "Registration number is required" });
+    }
+    
+    const data = await loadData();
+    const user = data.users.find(u => u.regNumber === regNumber);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+    
+    cleanExpiredOTPs();
+    const code = generateOTP();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+    
+    otpStore.set(`reset_${regNumber}`, { code, expiresAt, purpose: 'reset', regNumber, phone: user.phone, email: user.email });
+    
+    const sendResult = sendOTP(user.phone, user.email, code);
+    
+    return res.json({ 
+      ok: true, 
+      message: "OTP sent successfully",
+      maskedPhone: sendResult.phone || null,
+      email: user.email ? user.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Verify OTP
+app.post("/api/otp/verify", async (req, res) => {
+  try {
+    const { phone, regNumber, code, purpose } = req.body;
+    if (!code) {
+      return res.status(400).json({ ok: false, error: "OTP code is required" });
+    }
+    
+    cleanExpiredOTPs();
+    const key = purpose === 'reset' ? `reset_${regNumber}` : `signup_${phone}`;
+    const stored = otpStore.get(key);
+    
+    if (!stored) {
+      return res.status(400).json({ ok: false, error: "OTP expired or invalid" });
+    }
+    
+    if (stored.code !== code) {
+      return res.status(400).json({ ok: false, error: "Invalid OTP code" });
+    }
+    
+    if (stored.expiresAt < Date.now()) {
+      otpStore.delete(key);
+      return res.status(400).json({ ok: false, error: "OTP expired" });
+    }
+    
+    // OTP verified - mark as used but keep for 2 minutes for signup/reset to complete
+    stored.verified = true;
+    stored.verifiedAt = Date.now();
+    
+    return res.json({ ok: true, message: "OTP verified successfully" });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post("/api/signup", async (req, res) => {
   try {
     const data = await loadData();
@@ -629,7 +783,31 @@ app.post("/api/signup", async (req, res) => {
   const regNumber = String(req.body.regNumber||'').trim();
   const password = String(req.body.password||'');
   const role = req.body.role;
-  if (!name || !surname || !age || !gender || !email || !phone || !regNumber || !password || !role) { return res.status(400).json({ ok: false, error: "All fields are required" }); }
+  const otpCode = String(req.body.otpCode||'').trim();
+  
+  if (!name || !surname || !age || !gender || !email || !phone || !regNumber || !password || !role) { 
+    return res.status(400).json({ ok: false, error: "All fields are required" }); 
+  }
+  
+  // Verify OTP
+  if (!otpCode) {
+    return res.status(400).json({ ok: false, error: "OTP code is required" });
+  }
+  
+  cleanExpiredOTPs();
+  const otpKey = `signup_${phone}`;
+  const storedOTP = otpStore.get(otpKey);
+  
+  if (!storedOTP || !storedOTP.verified || storedOTP.code !== otpCode) {
+    return res.status(400).json({ ok: false, error: "Invalid or unverified OTP" });
+  }
+  
+  // Check if OTP was verified within last 2 minutes
+  if (storedOTP.verifiedAt && (Date.now() - storedOTP.verifiedAt > 2 * 60 * 1000)) {
+    otpStore.delete(otpKey);
+    return res.status(400).json({ ok: false, error: "OTP verification expired, please request a new OTP" });
+  }
+  
   // Uniqueness validation across all users
   if (data.users.find(u => u.regNumber === regNumber)) { return res.status(400).json({ ok: false, error: "Registration number already exists" }); }
   if (data.users.find(u => (u.email||'').toLowerCase() === String(email).toLowerCase())) { return res.status(400).json({ ok: false, error: "Email already in use" }); }
@@ -648,6 +826,10 @@ app.post("/api/signup", async (req, res) => {
   if (organizerStatus) user.organizerStatus = organizerStatus;
     data.users.push(user); 
     await saveData(data);
+    
+  // Clear used OTP
+  otpStore.delete(otpKey);
+    
   return res.json({ ok: true, user });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -694,6 +876,53 @@ app.get('/api/admin/who', async (req,res)=>{
   }catch{ res.status(500).json({ ok:false }); }
 });
 app.post("/api/reset-password", async (req, res) => {
+  try {
+    const { regNumber, newPassword, otpCode } = req.body;
+    if (!regNumber || !newPassword || !otpCode) {
+      return res.status(400).json({ ok: false, error: "Registration number, new password, and OTP are required" });
+    }
+    
+    const data = await loadData();
+    const user = data.users.find(u => u.regNumber === regNumber);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+    
+    // Verify OTP
+    cleanExpiredOTPs();
+    const otpKey = `reset_${regNumber}`;
+    const storedOTP = otpStore.get(otpKey);
+    
+    if (!storedOTP || !storedOTP.verified || storedOTP.code !== otpCode) {
+      return res.status(400).json({ ok: false, error: "Invalid or unverified OTP" });
+    }
+    
+    // Check if OTP was verified within last 2 minutes
+    if (storedOTP.verifiedAt && (Date.now() - storedOTP.verifiedAt > 2 * 60 * 1000)) {
+      otpStore.delete(otpKey);
+      return res.status(400).json({ ok: false, error: "OTP verification expired, please request a new OTP" });
+    }
+    
+    // Validate password
+    if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,}$/.test(newPassword)) {
+      return res.status(400).json({ ok: false, error: "Password must contain uppercase, lowercase, number and be at least 6 characters long" });
+    }
+    
+    // Update password
+    user.password = String(newPassword);
+    await saveData(data);
+    
+    // Clear used OTP
+    otpStore.delete(otpKey);
+    
+    return res.json({ ok: true, message: "Password reset successfully" });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Old reset-password endpoint (deprecated - kept for backwards compatibility)
+app.post("/api/reset-password-old", async (req, res) => {
   const data = await loadData(); const { regNumber, role, newPassword } = req.body;
   const user = data.users.find(u => u.regNumber === regNumber && u.role === role);
   if (!user) { return res.status(404).json({ ok: false, error: "User not found or role does not match." }); }
@@ -1793,19 +2022,25 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
 
     // For videos, add optimized transformation options for faster upload and playback
     if (resourceType === 'video') {
+      // Generate thumbnail during upload
       uploadOptions.eager = [
-        { 
+        // Streaming profile must be separate and only directive
+        {
+          streaming_profile: 'auto'
+        },
+        // Optimized video for playback
+        {
           quality: 'auto',
           format: 'mp4',
           video_codec: 'h264',
           audio_codec: 'aac',
           bit_rate: 'auto',
-          streaming_profile: 'auto'
-        },
-        {
-          quality: 'auto',
-          format: 'mp4',
           transformation: [{ width: 1280, height: 720, crop: 'limit' }]
+        },
+        // Thumbnail for preview
+        {
+          format: 'jpg',
+          transformation: [{ width: 400, height: 300, crop: 'fill', quality: 'auto' }]
         }
       ];
       uploadOptions.eager_async = false; // Process immediately for faster availability
@@ -1856,9 +2091,28 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
     
     // Use eager transformation URL if available (for videos, this is optimized)
     let mediaUrl = cloudinaryResult.secure_url;
+    let thumbnailUrl = null;
+    
     if (type === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
-      // Use the optimized eager transformation URL for faster playback
-      mediaUrl = cloudinaryResult.eager[0].secure_url || cloudinaryResult.secure_url;
+      // Eager transformations: [0] = streaming_profile, [1] = optimized video, [2] = thumbnail
+      // Use the optimized video URL (index 1) for playback
+      if (cloudinaryResult.eager.length > 1 && cloudinaryResult.eager[1]) {
+        mediaUrl = cloudinaryResult.eager[1].secure_url || cloudinaryResult.secure_url;
+      }
+      // Get thumbnail URL (index 2)
+      if (cloudinaryResult.eager.length > 2 && cloudinaryResult.eager[2]) {
+        thumbnailUrl = cloudinaryResult.eager[2].secure_url;
+      }
+    } else if (type === 'photo') {
+      // Generate thumbnail for images
+      const thumbnailParts = cloudinaryResult.secure_url.split('/');
+      const versionIndex = thumbnailParts.findIndex(p => p.startsWith('v'));
+      if (versionIndex >= 0) {
+        thumbnailUrl = cloudinaryResult.secure_url.replace(
+          /\/v\d+\//,
+          `/v${cloudinaryResult.version}/w_400,h_300,c_fill,q_auto,f_auto/`
+        );
+      }
     }
     
     const media = { 
@@ -1866,6 +2120,7 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
       eventId: parseInt(eventId), 
       name: req.file.originalname, 
       url: mediaUrl, // Cloudinary URL (optimized for videos)
+      thumbnailUrl: thumbnailUrl, // Thumbnail URL for preview
       publicId: cloudinaryResult.public_id, // Cloudinary public ID for deletion
       type,
       size: req.file.size,
