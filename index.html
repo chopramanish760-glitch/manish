@@ -1366,13 +1366,13 @@ async function requestResetOTP() {
         const data = await res.json();
         
         if (res.ok && data.ok) {
-            let msg = "✅ OTP sent";
-            if (data.maskedPhone) {
-                msg += ` on ${data.maskedPhone}`;
-            } else if (data.email) {
-                msg += ` to ${data.email}`;
+            // Use backend message which includes "Mail sent on this email: {email}"
+            let msg = data.message || "✅ OTP sent";
+            if (data.emailSent && data.email) {
+                msg = `✅ ${msg}`;
+            } else {
+                msg = "✅ " + msg;
             }
-            msg += ". (For testing, check console)";
             resetOtpMsg.textContent = msg;
             resetOtpMsg.style.color = "#10b981";
             
@@ -1656,13 +1656,13 @@ async function requestSignupOTP() {
         const data = await res.json();
         
         if (res.ok && data.ok) {
-            let msg = "✅ OTP sent";
-            if (data.maskedPhone) {
-                msg += ` on ${data.maskedPhone}`;
-            } else if (data.email) {
-                msg += ` to ${data.email}`;
+            // Use backend message which includes "Mail sent on this email: {email}"
+            let msg = data.message || "✅ OTP sent";
+            if (data.emailSent && data.email) {
+                msg = `✅ ${msg}`;
+            } else {
+                msg = "✅ " + msg;
             }
-            msg += ". (For testing, check console)";
             otpMsg.textContent = msg;
             otpMsg.style.color = "#10b981";
             
@@ -4295,16 +4295,18 @@ async function openExternalNavFromMap(){
 async function resolveVenueLatLng(venue){
     // Expanded precise location dictionary for NITK venues
     const dict = {
-        // Lecture Halls (LH)
-        'LH-C': {lat:13.00898,lng:74.79397}, 
+        // Lecture Halls (LH) - Updated precise coordinates
+        'LH-C': {lat:13.009541469403494,lng:74.79391202867356}, 
+        'LHC': {lat:13.009541469403494,lng:74.79391202867356}, // Alias for LH-C
         'LH-D': {lat:13.00970,lng:74.79346},
         'LH-A': {lat:13.00949,lng:74.79397}, 
-        'LHB (MB)': {lat:13.01112,lng:74.79442},
+        'LHB (MB)': {lat:13.010618172871704,lng:74.79248509343847},
+        'LHB': {lat:13.010618172871704,lng:74.79248509343847}, // Alias
         
-        // Silver Jubilee Auditorium (SJA) - Exact location verified
-        'SJA': {lat:13.01083,lng:74.79695}, 
-        'SILVER JUBILEE AUDITORIUM': {lat:13.01083,lng:74.79695},
-        'SILVER JUBILEE STADIUM': {lat:13.01083,lng:74.79695},
+        // Silver Jubilee Auditorium (SJA) - Updated exact location
+        'SJA': {lat:13.00868428465928,lng:74.79572520201738}, 
+        'SILVER JUBILEE AUDITORIUM': {lat:13.00868428465928,lng:74.79572520201738},
+        'SILVER JUBILEE STADIUM': {lat:13.00868428465928,lng:74.79572520201738},
         
         // Main Building and Seminar Halls
         'MAIN BUILDING': {lat:13.01112,lng:74.79442},
@@ -4312,14 +4314,22 @@ async function resolveVenueLatLng(venue){
         'SEMINAR HALL B (MB)': {lat:13.01113,lng:74.79428},
         'SEMINAR HALL C (MB)': {lat:13.01113,lng:74.79428}, 
         
-        // Outdoor venues
-        'OPEN THEATER': {lat:13.01083,lng:74.79695}, // Same as SJA (adjacent location)
+        // Outdoor venues - Updated coordinates
+        'OPEN THEATER': {lat:13.010456144978718,lng:74.79596660083536},
         'NEW SPORTS COMPLEX': {lat:13.01006,lng:74.79830}, 
         'MAIN GROUND': {lat:13.01015,lng:74.79755},
         
         // Central Research Facility (CRF) - Exact location verified
         'CRF': {lat:13.00933,lng:74.79539}, 
         'CENTRAL RESEARCH FACILITY': {lat:13.00933,lng:74.79539},
+        
+        // Computer and Communication Centre (CCC) - New venue added
+        'CCC': {lat:13.00942125464852,lng:74.79534432832682},
+        'COMPUTER AND COMMUNICATION CENTRE': {lat:13.00942125464852,lng:74.79534432832682},
+        'COMPUTER COMMUNICATION CENTRE': {lat:13.00942125464852,lng:74.79534432832682},
+        
+        // Additional LHC location (second coordinate provided)
+        'LHC-ALT': {lat:13.012013699050907,lng:74.79228660996593}, // Alternative LHC location
         
         // Other facilities
         'GYM': {lat:13.00720,lng:74.79482},

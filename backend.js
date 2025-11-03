@@ -5,7 +5,7 @@ const path = require("path");
 const { MongoClient, GridFSBucket, ObjectId } = require("mongodb");
 const cors = require("cors");
 const cloudinary = require("cloudinary").v2;
-const nodemailer = require("nodemailer");
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -664,36 +664,26 @@ function maskPhoneNumber(phone) {
   return 'xxxxxx' + last4;
 }
 
-// Send OTP via email using AhaSend SMTP (changed from SMS to Email OTP)
+// Send OTP via email using Brevo API
 async function sendOTP(phone, email, code) {
   // Prioritize email over phone - send OTP via email
   if (email) {
     const maskedEmail = email.replace(/(.{2})(.*)(@.*)/, '$1****$3'); // Mask email for logging
     
-    // AhaSend SMTP configuration
-    const AHASEND_SMTP_USERNAME = process.env.AHASEND_SMTP_USERNAME || "WtooEmLG11";
-    const AHASEND_SMTP_PASSWORD = process.env.AHASEND_SMTP_PASSWORD || "DVZIKGW0cZqU4PM9a3qhXTR1";
-    const AHASEND_SMTP_HOST = process.env.AHASEND_SMTP_HOST || "send.ahasend.com"; // Use send-us.ahasend.com for US
-    const AHASEND_SMTP_PORT = parseInt(process.env.AHASEND_SMTP_PORT || "587");
-    const AHASEND_FROM_EMAIL = process.env.AHASEND_FROM_EMAIL || "[email protected]";
-    const AHASEND_FROM_NAME = process.env.AHASEND_FROM_NAME || "Campus Event Hub";
+    // Brevo API configuration
+    const BREVO_API_KEY = process.env.BREVO_API_KEY;
+    const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || "chopramanish760@gmail.com";
+    const BREVO_FROM_NAME = process.env.BREVO_FROM_NAME || "Campus Event Hub";
     
-    if (AHASEND_SMTP_USERNAME && AHASEND_SMTP_PASSWORD) {
+    if (BREVO_API_KEY) {
       try {
-        // Create SMTP transporter
-        const transporter = nodemailer.createTransport({
-          host: AHASEND_SMTP_HOST,
-          port: AHASEND_SMTP_PORT,
-          secure: false, // true for 465, false for other ports
-          auth: {
-            user: AHASEND_SMTP_USERNAME,
-            pass: AHASEND_SMTP_PASSWORD
-          },
-          tls: {
-            // StartTLS is required for AhaSend
-            ciphers: 'SSLv3'
-          }
-        });
+        // Initialize Brevo API client
+        const defaultClient = SibApiV3Sdk.ApiClient.instance;
+        const apiKey = defaultClient.authentications['api-key'];
+        apiKey.apiKey = BREVO_API_KEY;
+        
+        // Use TransactionalEmailsApi for sending individual emails
+        const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
         
         const emailSubject = "Your OTP for Campus Event Hub";
         const emailText = `Your OTP code is: ${code}\n\nThis code is valid for 5 minutes.\n\nIf you didn't request this OTP, please ignore this email.`;
@@ -709,41 +699,45 @@ async function sendOTP(phone, email, code) {
           </div>
         `;
         
-        console.log(`📧 Attempting to send OTP via AhaSend SMTP to: ${maskedEmail}`);
+        // Create SendSmtpEmail object
+        const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+        sendSmtpEmail.subject = emailSubject;
+        sendSmtpEmail.htmlContent = emailHtml;
+        sendSmtpEmail.textContent = emailText;
+        sendSmtpEmail.sender = {
+          name: BREVO_FROM_NAME,
+          email: BREVO_FROM_EMAIL
+        };
+        sendSmtpEmail.to = [{
+          email: email
+        }];
+        
+        console.log(`📧 Attempting to send OTP via Brevo to: ${maskedEmail}`);
         
         // Send email
-        const info = await transporter.sendMail({
-          from: `"${AHASEND_FROM_NAME}" <${AHASEND_FROM_EMAIL}>`,
-          to: email,
-          subject: emailSubject,
-          text: emailText,
-          html: emailHtml
-        });
+        const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
         
-        console.log(`✅ OTP Email sent successfully to ${maskedEmail} via AhaSend SMTP`);
-        console.log(`   Message ID: ${info.messageId}`);
-        console.log(`   Response: ${info.response}`);
+        console.log(`✅ OTP Email sent successfully to ${maskedEmail} via Brevo`);
+        console.log(`   Message ID: ${result.messageId || 'N/A'}`);
         
-        return { phone: null, email: maskedEmail, sent: true };
+        return { phone: null, email: email, sent: true }; // Return actual email for display
         
       } catch (error) {
-        console.error(`❌ Error sending email via AhaSend SMTP: ${error.message}`);
-        console.error(`   Error code: ${error.code || 'N/A'}`);
-        console.error(`   Error stack: ${error.stack}`);
+        console.error(`❌ Error sending email via Brevo: ${error.message}`);
+        if (error.response && error.response.body) {
+          console.error(`   Error details: ${JSON.stringify(error.response.body)}`);
+        }
         
         // Fallback to console log if email fails
         console.log(`📧 OTP sent to ${maskedEmail}: ${code} (Email service error, check logs)`);
-        return { phone: null, email: maskedEmail, sent: false };
+        return { phone: null, email: email, sent: false };
       }
     } else {
-      // No SMTP credentials configured - fallback to console log
+      // No API key configured - fallback to console log
       console.log(`📧 OTP sent to ${email}: ${code}`);
-      console.log(`⚠️  AhaSend SMTP credentials not set. To enable email OTP:`);
-      console.log(`   - Set AHASEND_SMTP_USERNAME environment variable`);
-      console.log(`   - Set AHASEND_SMTP_PASSWORD environment variable`);
-      console.log(`   - Optional: Set AHASEND_SMTP_HOST (default: send.ahasend.com)`);
-      console.log(`   - Optional: Set AHASEND_FROM_EMAIL and AHASEND_FROM_NAME`);
-      return { phone: null, email: email.replace(/(.{2})(.*)(@.*)/, '$1****$3'), sent: false };
+      console.log(`⚠️  Brevo API key not set. To enable email OTP:`);
+      console.log(`   - Set BREVO_API_KEY environment variable`);
+      return { phone: null, email: email, sent: false };
     }
   } else if (phone) {
     // Email not available, log phone but don't send SMS (switched to email-only OTP)
@@ -783,10 +777,10 @@ app.post("/api/otp/request-signup", async (req, res) => {
     
     return res.json({ 
       ok: true, 
-      message: sendResult.sent ? "OTP sent successfully via email" : "OTP generated (check backend logs for email status)",
+      message: sendResult.sent ? `Mail sent on this email: ${email}` : "OTP generated (check backend logs for email status)",
       maskedPhone: sendResult.phone || null,
-      maskedEmail: sendResult.email || null,
-      email: email ? email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null, // Mask email partially
+      maskedEmail: sendResult.email ? sendResult.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null,
+      email: sendResult.sent ? email : (email ? email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null),
       emailSent: sendResult.sent || false
     });
   } catch (err) {
@@ -849,10 +843,10 @@ app.post("/api/otp/request-reset", async (req, res) => {
     
     return res.json({ 
       ok: true, 
-      message: sendResult.sent ? "OTP sent successfully via email" : "OTP generated (check backend logs for email status)",
+      message: sendResult.sent ? `Mail sent on this email: ${user.email}` : "OTP generated (check backend logs for email status)",
       maskedPhone: sendResult.phone || null,
-      maskedEmail: sendResult.email || null,
-      email: user.email ? user.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null,
+      maskedEmail: sendResult.email ? sendResult.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null,
+      email: sendResult.sent ? user.email : (user.email ? user.email.replace(/(.{2})(.*)(@.*)/, '$1****$3') : null),
       emailSent: sendResult.sent || false
     });
   } catch (err) {
