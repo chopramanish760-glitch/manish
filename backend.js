@@ -294,9 +294,9 @@ async function initializeApp() {
   // Start checking for event live notifications every minute
   setInterval(checkEventLiveNotifications, 60000);
   
-  // Start checking for completed events to send feedback notifications every 30 seconds for precision
-  // This ensures notifications are sent within ~1 minute of event ending (checks every 30s, sends at 1-1.5 min window)
-  setInterval(checkCompletedEventsForFeedback, 30000);
+  // Start checking for completed events to send feedback notifications every 10 seconds for precision
+  // This ensures notifications are sent within ~1 minute of event ending (checks every 10s, sends at 1-3 min window)
+  setInterval(checkCompletedEventsForFeedback, 10000);
 }
 
 // Internal Keep-Alive Mechanism - Prevents backend from sleeping
@@ -455,27 +455,65 @@ async function checkCompletedEventsForFeedback() {
       const feedbackNotificationKey = `feedback_notified_${event.id}`;
       if (data.eventNotifications[feedbackNotificationKey]) continue;
       
-      const eventStart = new Date(`${event.date}T${event.time}`);
-      const eventEnd = new Date(eventStart.getTime() + (event.duration || 0) * 60000);
+      // Parse event start time - handle different time formats
+      let eventStart;
+      try {
+        // Try standard ISO format first
+        if (event.time && /^\d{2}:\d{2}(:\d{2})?$/.test(event.time)) {
+          eventStart = new Date(`${event.date}T${event.time}:00`);
+        } else if (event.time && /am|pm/i.test(event.time)) {
+          // Handle AM/PM format
+          let [timePart, ampm] = event.time.toLowerCase().split(/\s+/);
+          let [hours, minutes] = timePart.split(':').map(Number);
+          if (ampm === 'pm' && hours !== 12) hours += 12;
+          if (ampm === 'am' && hours === 12) hours = 0;
+          eventStart = new Date(`${event.date}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`);
+        } else {
+          eventStart = new Date(`${event.date}T${event.time || '00:00:00'}`);
+        }
+      } catch (e) {
+        console.warn(`⚠️ Could not parse event time for "${event.title}":`, e.message);
+        continue; // Skip this event if we can't parse its time
+      }
+      
+      // Calculate event end time
+      const durationMinutes = event.duration || 0;
+      const eventEnd = new Date(eventStart.getTime() + durationMinutes * 60000);
       
       // Check if event has completed (end time is in the past)
       const timeSinceEnd = now.getTime() - eventEnd.getTime();
       
-      // Send notifications exactly 1 minute after event ends (with 30 second window for polling precision)
+      // Send notifications exactly 1 minute after event ends (with expanded window for reliability)
       const oneMinute = 1 * 60 * 1000;
-      const oneMinuteThirtySeconds = 1.5 * 60 * 1000;
+      const threeMinutes = 3 * 60 * 1000;
       
-      // Send notification if event ended between 1 minute and 1.5 minutes ago (to catch it precisely)
-      if (timeSinceEnd >= oneMinute && timeSinceEnd <= oneMinuteThirtySeconds) {
+      // Send notification if event ended between 1 minute and 3 minutes ago (wider window to ensure we catch it)
+      if (timeSinceEnd >= oneMinute && timeSinceEnd <= threeMinutes) {
         // Send feedback request notifications to all booked users
         let notificationCount = 0;
-        for (const booking of event.bookings) {
-          if (!data.notifications[booking.regNumber]) {
-            data.notifications[booking.regNumber] = [];
+        
+        // Ensure bookings is an array
+        const bookings = Array.isArray(event.bookings) ? event.bookings : [];
+        
+        if (bookings.length === 0) {
+          console.log(`⚠️ Event "${event.title}" has no bookings, skipping feedback notifications`);
+          continue;
+        }
+        
+        for (const booking of bookings) {
+          // Handle both object format {regNumber: ...} and direct regNumber string
+          const regNumber = booking.regNumber || booking;
+          if (!regNumber) {
+            console.warn(`⚠️ Booking has no regNumber:`, booking);
+            continue;
+          }
+          
+          if (!data.notifications[regNumber]) {
+            data.notifications[regNumber] = [];
           }
           
           const notificationMsg = `📝 "${event.title}" has completed! Please share your feedback.`;
-          data.notifications[booking.regNumber].unshift({
+          data.notifications[regNumber].unshift({
             msg: notificationMsg,
             time: now.toISOString(),
             read: false,
@@ -492,14 +530,23 @@ async function checkCompletedEventsForFeedback() {
         
         // Broadcast notification updates via SSE so frontend receives them automatically
         try {
-          for (const booking of event.bookings) {
-            broadcast('notifications_changed', { regNumber: booking.regNumber, reason: 'feedback_request', eventId: event.id });
+          for (const booking of bookings) {
+            const regNumber = booking.regNumber || booking;
+            if (regNumber) {
+              broadcast('notifications_changed', { regNumber: regNumber, reason: 'feedback_request', eventId: event.id });
+            }
           }
         } catch (err) {
           console.warn('Could not broadcast notification update:', err);
         }
         
-        console.log(`📝 Sent feedback request notifications to ${notificationCount} booked users for completed event: ${event.title} (ended ${Math.round(timeSinceEnd / 60000)} minutes ago)`);
+        console.log(`✅ 📝 Sent feedback request notifications to ${notificationCount} booked users for completed event: "${event.title}" (ended ${Math.round(timeSinceEnd / 60000)} min ${Math.round((timeSinceEnd % 60000) / 1000)} sec ago)`);
+      } else if (timeSinceEnd > 0 && timeSinceEnd < oneMinute) {
+        // Debug: Log when event just ended but notification not sent yet
+        const secondsAgo = Math.round(timeSinceEnd / 1000);
+        if (secondsAgo % 10 === 0) { // Log every 10 seconds to avoid spam
+          console.log(`⏳ Event "${event.title}" ended ${secondsAgo} seconds ago. Notification will be sent in ~${60 - secondsAgo} seconds.`);
+        }
       }
     }
   } catch (error) {
@@ -2138,71 +2185,48 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
       }
     };
 
-    // For videos, add optimized transformation options for faster upload and playback
+    // Optimize upload settings for faster uploads
     if (resourceType === 'video') {
-      // Generate thumbnail during upload
+      // Use async eager transformations to avoid blocking upload
+      uploadOptions.eager_async = true; // Process transformations asynchronously for faster upload
       uploadOptions.eager = [
-        // Streaming profile must be separate and only directive
+        // Streaming profile for video streaming
         {
           streaming_profile: 'auto'
         },
-        // Optimized video for playback
-        {
-          quality: 'auto',
-          format: 'mp4',
-          video_codec: 'h264',
-          audio_codec: 'aac',
-          bit_rate: 'auto',
-          transformation: [{ width: 1280, height: 720, crop: 'limit' }]
-        },
-        // Thumbnail for preview
+        // Thumbnail for preview (lightweight)
         {
           format: 'jpg',
           transformation: [{ width: 400, height: 300, crop: 'fill', quality: 'auto' }]
         }
       ];
-      uploadOptions.eager_async = false; // Process immediately for faster availability
-      uploadOptions.invalidate = true; // Clear CDN cache for updated videos
-      uploadOptions.chunk_size = 6000000; // 6MB chunks for faster streaming
-    } else {
-      // For images, optimize quality and format for faster upload
+      // Optimize video settings for faster upload
       uploadOptions.quality = 'auto';
+      uploadOptions.format = 'mp4';
+      uploadOptions.chunk_size = 5000000; // 5MB chunks - optimal balance
+      uploadOptions.timeout = 120000; // 2 minute timeout for large videos
+    } else {
+      // For images, use minimal processing for faster upload
+      uploadOptions.quality = 'auto:good'; // Faster than 'auto'
       uploadOptions.fetch_format = 'auto';
-      uploadOptions.raw_convert = 'aspose'; // Faster conversion
+      uploadOptions.timeout = 60000; // 1 minute timeout for images
     }
 
-    // Upload to Cloudinary - use stream upload for better performance (especially for videos)
+    // Upload to Cloudinary - use stream upload for all files (faster than base64)
     const cloudinaryResult = await new Promise((resolve, reject) => {
-      // For videos, use stream upload which is more efficient for large files
-      if (resourceType === 'video') {
-        const uploadStream = cloudinary.uploader.upload_stream(
-          uploadOptions,
-          (error, result) => {
-            if (error) {
-              console.error('❌ Cloudinary upload error:', error);
-              reject(error);
-            } else {
-              resolve(result);
-            }
+      // Use stream upload for both images and videos (more efficient)
+      const uploadStream = cloudinary.uploader.upload_stream(
+        uploadOptions,
+        (error, result) => {
+          if (error) {
+            console.error('❌ Cloudinary upload error:', error);
+            reject(error);
+          } else {
+            resolve(result);
           }
-        );
-        uploadStream.end(req.file.buffer);
-      } else {
-        // For images, use data URI (smaller files)
-        const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-        cloudinary.uploader.upload(
-          dataUri,
-          uploadOptions,
-          (error, result) => {
-            if (error) {
-              console.error('❌ Cloudinary upload error:', error);
-              reject(error);
-            } else {
-              resolve(result);
-            }
-          }
-        );
-      }
+        }
+      );
+      uploadStream.end(req.file.buffer);
     });
     
     console.log(`✅ File uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
@@ -2211,16 +2235,17 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
     let mediaUrl = cloudinaryResult.secure_url;
     let thumbnailUrl = null;
     
+    // Handle eager transformations (may be async, so check availability)
     if (type === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
-      // Eager transformations: [0] = streaming_profile, [1] = optimized video, [2] = thumbnail
-      // Use the optimized video URL (index 1) for playback
-      if (cloudinaryResult.eager.length > 1 && cloudinaryResult.eager[1]) {
-        mediaUrl = cloudinaryResult.eager[1].secure_url || cloudinaryResult.secure_url;
+      // Eager transformations: [0] = streaming_profile, [1] = thumbnail
+      // For async eager, use the original URL (optimizations happen in background)
+      // Get thumbnail URL if available
+      const thumbnailTransformation = cloudinaryResult.eager.find(e => e.format === 'jpg');
+      if (thumbnailTransformation) {
+        thumbnailUrl = thumbnailTransformation.secure_url;
       }
-      // Get thumbnail URL (index 2)
-      if (cloudinaryResult.eager.length > 2 && cloudinaryResult.eager[2]) {
-        thumbnailUrl = cloudinaryResult.eager[2].secure_url;
-      }
+      // Use original URL - Cloudinary will serve optimized version automatically
+      mediaUrl = cloudinaryResult.secure_url;
     } else if (type === 'photo') {
       // Generate thumbnail for images
       const thumbnailParts = cloudinaryResult.secure_url.split('/');
@@ -2532,64 +2557,37 @@ app.post('/api/messages/media', chatUpload.single('file'), async (req, res) => {
 
     // Optimize for chat (smaller files, faster upload)
     if (resourceType === 'video') {
-      uploadOptions.eager = [
-        {
-          quality: 'auto',
-          format: 'mp4',
-          video_codec: 'h264',
-          audio_codec: 'aac',
-          bit_rate: '500k', // Lower bitrate for chat videos (faster upload/playback)
-          transformation: [{ width: 854, height: 480, crop: 'limit' }] // Limit size for chat
-        }
-      ];
-      uploadOptions.eager_async = false;
-    } else {
+      uploadOptions.eager_async = true; // Async processing for faster upload
       uploadOptions.quality = 'auto';
+      uploadOptions.format = 'mp4';
+      uploadOptions.chunk_size = 3000000; // 3MB chunks for chat videos
+      uploadOptions.timeout = 90000; // 90 second timeout
+    } else {
+      uploadOptions.quality = 'auto:good'; // Faster processing
       uploadOptions.fetch_format = 'auto';
+      uploadOptions.timeout = 45000; // 45 second timeout for chat images
     }
 
-    // Upload to Cloudinary - use stream upload for videos
+    // Upload to Cloudinary - use stream upload for all files (faster than base64)
     const cloudinaryResult = await new Promise((resolve, reject) => {
-      // For videos, use stream upload which is more efficient
-      if (resourceType === 'video') {
-        const uploadStream = cloudinary.uploader.upload_stream(
-          uploadOptions,
-          (error, result) => {
-            if (error) {
-              console.error('❌ Cloudinary chat upload error:', error);
-              reject(error);
-            } else {
-              resolve(result);
-            }
+      const uploadStream = cloudinary.uploader.upload_stream(
+        uploadOptions,
+        (error, result) => {
+          if (error) {
+            console.error('❌ Cloudinary chat upload error:', error);
+            reject(error);
+          } else {
+            resolve(result);
           }
-        );
-        uploadStream.end(req.file.buffer);
-      } else {
-        // For images, use data URI
-        const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-        cloudinary.uploader.upload(
-          dataUri,
-          uploadOptions,
-          (error, result) => {
-            if (error) {
-              console.error('❌ Cloudinary chat upload error:', error);
-              reject(error);
-            } else {
-              resolve(result);
-            }
-          }
-        );
-      }
+        }
+      );
+      uploadStream.end(req.file.buffer);
     });
     
     console.log(`✅ Chat file uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
     
-    // Use eager transformation URL if available (for videos, this is optimized)
+    // Use original URL (async eager transformations happen in background)
     let mediaUrl = cloudinaryResult.secure_url;
-    if (mediaType === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
-      // Use the optimized eager transformation URL for faster playback
-      mediaUrl = cloudinaryResult.eager[0].secure_url || cloudinaryResult.secure_url;
-    }
     
     const msg = { 
       id: Date.now(), 
