@@ -1174,7 +1174,9 @@ async function renderMedia() {
                         thumbnailUrl = baseUrl.replace(/(\/v\d+\/)(.+)(\.(mp4|webm|ogg))/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2.jpg');
                     }
                     
-                    sectionHtml += `<div class="media-item" onclick="showLightbox('${m.url || m._id}', 'video')" style="position:relative; cursor:pointer;">
+                    // Use actual video URL for lightbox - prefer optimizedVideoUrl or mediaUrl
+                    const videoLightboxUrl = optimizedVideoUrl || mediaUrl || m.url || m._id;
+                    sectionHtml += `<div class="media-item" onclick="showLightbox('${videoLightboxUrl}', 'video')" style="position:relative; cursor:pointer;">
                         <img src="${thumbnailUrl || ''}" style="width:100%; height:120px; object-fit:cover; display:block; border-radius:8px; pointer-events:none;" onerror="this.style.display='none'">
                         <div class="play-overlay" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none;">
                             <div class="play-icon">▶</div>
@@ -2768,9 +2770,14 @@ async function joinWaitlist(eventId){
 
 function openOrganizerMessages(eventId){
     const body = document.getElementById('modal-body');
-    body.innerHTML = `<div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;"><a class="map-back-arrow" onclick="closeModal()">←</a><h3 style="margin:0;">💬 Messages</h3></div><div class="card"><div class="sub-nav"><button id="tabPrimary" class="sub-nav-btn active" onclick="setConvTab('primary')">Primary (Volunteers)</button><button id="tabGeneral" class="sub-nav-btn" onclick="setConvTab('general')">General</button><button id="tabFeedback" class="sub-nav-btn" onclick="setConvTab('feedback')">📝 Feedback</button></div><div id="convList" style="max-height:360px; overflow:auto; padding:8px;"></div></div>`;
+    body.innerHTML = `<div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;"><a class="map-back-arrow" onclick="closeModal()">←</a><h3 style="margin:0;">💬 Messages</h3></div><div class="card"><div class="sub-nav"><button id="tabPrimary" class="sub-nav-btn" onclick="setConvTab('primary')">Primary (Volunteers)</button><button id="tabGeneral" class="sub-nav-btn" onclick="setConvTab('general')">General</button><button id="tabFeedback" class="sub-nav-btn active" onclick="setConvTab('feedback')">📝 Feedback</button></div><div id="convList" style="max-height:360px; overflow:auto; padding:8px;"></div></div>`;
     document.getElementById('modal').style.display = 'flex';
+    window.__convEventId = eventId; // Set this BEFORE calling loadOrganizerFeedbacks
     loadOrganizerConversations(eventId);
+    // Load feedback by default
+    setTimeout(() => {
+        loadOrganizerFeedbacks(eventId);
+    }, 100);
 }
 
 async function loadOrganizerConversations(eventId){
@@ -3084,9 +3091,13 @@ async function showEventMediaToStudent(eventId) {
                     thumbnailUrl = mediaUrl.replace(/(\/v\d+\/)(.+)(\.(mp4|webm|ogg))/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2.jpg');
                 }
                 
-                mediaHtml += `<div class="media-item" onclick="showLightbox('${media.url || media._id}', 'video')" style="position:relative; cursor:pointer; border-radius:8px; overflow:hidden; background:#000;">
-                    <img src="${thumbnailUrl || ''}" style="width:100%; height:150px; object-fit:cover; display:block;" onerror="this.style.display='none'">
-                    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); width:48px; height:48px; border-radius:50%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; color:white; font-size:20px; border:2px solid rgba(255,255,255,0.9);">▶</div>
+                // Use the actual media URL for lightbox, not just the ID
+                const videoLightboxUrl = mediaUrl || media.url || media._id;
+                mediaHtml += `<div class="media-item" onclick="showLightbox('${videoLightboxUrl}', 'video')" style="position:relative; cursor:pointer; border-radius:8px; overflow:hidden; background:#000;">
+                    <img src="${thumbnailUrl || ''}" style="width:100%; height:150px; object-fit:cover; display:block; pointer-events:none;" onerror="this.style.display='none'">
+                    <div class="play-overlay" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none;">
+                        <div class="play-icon">▶</div>
+                    </div>
                 </div>`;
             }
         });
@@ -3668,8 +3679,6 @@ async function pollNotifications(){
         
         if(!ticker || !tickerTextEl) return;
         
-        const pollTime = Date.now();
-        const bannerActive = pollTime < welcomeBannerUntil;
         const notificationsScreen = document.getElementById("screen-notifications");
         const isNotificationsScreenActive = notificationsScreen && notificationsScreen.style.display === "block";
         
@@ -3688,13 +3697,16 @@ async function pollNotifications(){
                 }
                 tickerTextEl.textContent = tickerMessage;
                 
-                // Only hide if on notifications screen, otherwise keep showing
+                // Only hide if on notifications screen, otherwise ALWAYS show when unread
                 if(isNotificationsScreenActive) {
                     // Hide only when viewing notifications screen
                     ticker.style.display = "none";
                 } else {
-                    // Show ticker when there are unread notifications (ignore banner)
+                    // ALWAYS show ticker when there are unread notifications
                     ticker.style.display = "block";
+                    ticker.style.visibility = "visible";
+                    ticker.style.opacity = "1";
+                    ticker.style.zIndex = "999";
                     tickerTextEl.style.animationPlayState = 'running';
                 }
             } else {
