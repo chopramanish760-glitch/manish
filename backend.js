@@ -483,12 +483,11 @@ async function checkCompletedEventsForFeedback() {
       // Check if event has completed (end time is in the past)
       const timeSinceEnd = now.getTime() - eventEnd.getTime();
       
-      // Send notifications exactly 1 minute after event ends (precise window: 50-90 seconds)
-      const fiftySeconds = 50 * 1000;  // 50 seconds
-      const ninetySeconds = 90 * 1000; // 90 seconds (1.5 minutes)
+      // Send notifications instantly after event ends (window: 0-30 seconds for immediate delivery)
+      const immediateWindow = 30 * 1000; // 30 seconds
       
-      // Send notification if event ended between 50 seconds and 90 seconds ago (catches 1 minute precisely)
-      if (timeSinceEnd >= fiftySeconds && timeSinceEnd <= ninetySeconds) {
+      // Send notification if event ended within the last 30 seconds (instant delivery)
+      if (timeSinceEnd > 0 && timeSinceEnd <= immediateWindow) {
         // Send feedback request notifications to all booked users
         let notificationCount = 0;
         
@@ -541,16 +540,12 @@ async function checkCompletedEventsForFeedback() {
         }
         
         console.log(`✅ 📝 Sent feedback request notifications to ${notificationCount} booked users for completed event: "${event.title}" (ended ${Math.round(timeSinceEnd / 60000)} min ${Math.round((timeSinceEnd % 60000) / 1000)} sec ago)`);
-      } else if (timeSinceEnd > 0 && timeSinceEnd < fiftySeconds) {
-        // Debug: Log when event just ended but notification not sent yet
+      } else if (timeSinceEnd > immediateWindow && timeSinceEnd <= 5 * 60 * 1000) {
+        // Log if we missed the window (event ended more than 30 seconds ago but notification not sent)
         const secondsAgo = Math.round(timeSinceEnd / 1000);
-        if (secondsAgo % 10 === 0) { // Log every 10 seconds to avoid spam
-          console.log(`⏳ Event "${event.title}" ended ${secondsAgo} seconds ago. Notification will be sent in ~${50 - secondsAgo} seconds.`);
+        if (secondsAgo % 30 === 0) { // Log every 30 seconds to avoid spam
+          console.warn(`⚠️ Event "${event.title}" ended ${secondsAgo} seconds ago but notification window missed. Check if already notified.`);
         }
-      } else if (timeSinceEnd > ninetySeconds && timeSinceEnd <= 5 * 60 * 1000) {
-        // Log if we missed the window (event ended 1.5-5 minutes ago but notification not sent)
-        const minutesAgo = Math.round(timeSinceEnd / 60000);
-        console.warn(`⚠️ Event "${event.title}" ended ${minutesAgo} minutes ago but notification window missed. Check if already notified or event has no bookings.`);
       }
     }
   } catch (error) {
@@ -2191,28 +2186,40 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
 
     // Optimize upload settings for faster uploads
     if (resourceType === 'video') {
-      // Use async eager transformations to avoid blocking upload
-      uploadOptions.eager_async = true; // Process transformations asynchronously for faster upload
+      // Make thumbnail synchronous (fast), but keep other optimizations
+      uploadOptions.eager_async = false; // Make thumbnail synchronous so it's ready immediately
       uploadOptions.eager = [
-        // Streaming profile for video streaming
-        {
-          streaming_profile: 'auto'
-        },
-        // Thumbnail for preview (lightweight)
+        // Thumbnail for preview (synchronous - must be ready immediately)
         {
           format: 'jpg',
           transformation: [{ width: 400, height: 300, crop: 'fill', quality: 'auto' }]
+        },
+        // Optimized video for playback (synchronous for immediate playback)
+        {
+          quality: 'auto',
+          format: 'mp4',
+          video_codec: 'h264',
+          audio_codec: 'aac',
+          bit_rate: '1m', // Moderate bitrate for faster processing
+          transformation: [{ width: 1280, height: 720, crop: 'limit' }]
         }
       ];
-      // Optimize video settings for faster upload
+      // Optimize video settings
       uploadOptions.quality = 'auto';
       uploadOptions.format = 'mp4';
-      uploadOptions.chunk_size = 5000000; // 5MB chunks - optimal balance
-      uploadOptions.timeout = 120000; // 2 minute timeout for large videos
+      uploadOptions.chunk_size = 6000000; // 6MB chunks
+      uploadOptions.timeout = 180000; // 3 minute timeout for large videos
     } else {
-      // For images, use minimal processing for faster upload
-      uploadOptions.quality = 'auto:good'; // Faster than 'auto'
+      // For images, generate thumbnail synchronously
+      uploadOptions.quality = 'auto:good';
       uploadOptions.fetch_format = 'auto';
+      uploadOptions.eager = [
+        // Thumbnail for images (synchronous)
+        {
+          transformation: [{ width: 400, height: 300, crop: 'fill', quality: 'auto' }]
+        }
+      ];
+      uploadOptions.eager_async = false;
       uploadOptions.timeout = 60000; // 1 minute timeout for images
     }
 
@@ -2235,30 +2242,46 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
     
     console.log(`✅ File uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
     
-    // Use eager transformation URL if available (for videos, this is optimized)
+    // Use eager transformation URL if available (synchronous eager means they're ready)
     let mediaUrl = cloudinaryResult.secure_url;
     let thumbnailUrl = null;
     
-    // Handle eager transformations (may be async, so check availability)
+    // Handle eager transformations (synchronous, so they're ready immediately)
     if (type === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
-      // Eager transformations: [0] = streaming_profile, [1] = thumbnail
-      // For async eager, use the original URL (optimizations happen in background)
-      // Get thumbnail URL if available
+      // Eager transformations: [0] = thumbnail (jpg), [1] = optimized video (mp4)
       const thumbnailTransformation = cloudinaryResult.eager.find(e => e.format === 'jpg');
+      const optimizedVideoTransformation = cloudinaryResult.eager.find(e => e.format === 'mp4');
+      
       if (thumbnailTransformation) {
         thumbnailUrl = thumbnailTransformation.secure_url;
       }
-      // Use original URL - Cloudinary will serve optimized version automatically
-      mediaUrl = cloudinaryResult.secure_url;
+      
+      // Use optimized video URL if available, otherwise use original
+      if (optimizedVideoTransformation) {
+        mediaUrl = optimizedVideoTransformation.secure_url;
+      } else {
+        // Fallback: use original URL with streaming profile
+        mediaUrl = cloudinaryResult.secure_url.replace(/\/(upload|v\d+)\//, '/$1/sp_auto/');
+      }
     } else if (type === 'photo') {
-      // Generate thumbnail for images
-      const thumbnailParts = cloudinaryResult.secure_url.split('/');
-      const versionIndex = thumbnailParts.findIndex(p => p.startsWith('v'));
-      if (versionIndex >= 0) {
-        thumbnailUrl = cloudinaryResult.secure_url.replace(
-          /\/v\d+\//,
-          `/v${cloudinaryResult.version}/w_400,h_300,c_fill,q_auto,f_auto/`
-        );
+      // For images, use eager thumbnail if available
+      if (cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
+        const thumbnailTransformation = cloudinaryResult.eager.find(e => e.transformation && e.transformation[0] && e.transformation[0].crop === 'fill');
+        if (thumbnailTransformation && thumbnailTransformation.secure_url) {
+          thumbnailUrl = thumbnailTransformation.secure_url;
+        }
+      }
+      
+      // Fallback: generate thumbnail URL from original
+      if (!thumbnailUrl) {
+        const thumbnailParts = cloudinaryResult.secure_url.split('/');
+        const versionIndex = thumbnailParts.findIndex(p => p.startsWith('v'));
+        if (versionIndex >= 0) {
+          thumbnailUrl = cloudinaryResult.secure_url.replace(
+            /\/v\d+\//,
+            `/v${cloudinaryResult.version}/w_400,h_300,c_fill,q_auto,f_auto/`
+          );
+        }
       }
     }
     

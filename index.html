@@ -1054,17 +1054,16 @@ async function renderMedia() {
                     sectionHtml += `<div class="media-item"><img loading="lazy" decoding="async" src="${imgUrl}" onclick="showLightbox('${m.url || m._id}', 'photo')" style="width:100%; height:120px; object-fit:cover; cursor:pointer;" onerror="this.src='${mediaUrl}'"></div>`;
                 }
                 if (m.type === "video") {
-                    // Use stored thumbnail URL if available, otherwise generate one
+                    // Use stored thumbnail URL from backend (generated synchronously)
                     let thumbnailUrl = m.thumbnailUrl || '';
-                    let optimizedVideoUrl = mediaUrl;
+                    // Use optimized video URL from backend (from eager transformation)
+                    let optimizedVideoUrl = m.url || mediaUrl;
                     
-                    if (!thumbnailUrl && mediaUrl && mediaUrl.includes('cloudinary.com')) {
-                        // Fallback: generate thumbnail URL from video URL
-                        thumbnailUrl = mediaUrl.replace(/(\/v\d+\/)(.+)(\.(mp4|webm|ogg))/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2.jpg');
+                    // Fallback: generate thumbnail if backend didn't provide one
+                    if (!thumbnailUrl && (mediaUrl || optimizedVideoUrl) && (mediaUrl || optimizedVideoUrl).includes('cloudinary.com')) {
+                        const baseUrl = optimizedVideoUrl || mediaUrl;
+                        thumbnailUrl = baseUrl.replace(/(\/v\d+\/)(.+)(\.(mp4|webm|ogg))/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2.jpg');
                     }
-                    
-                    // Use the video URL directly (already optimized from backend)
-                    optimizedVideoUrl = mediaUrl;
                     
                     sectionHtml += `<div class="media-item" onclick="showLightbox('${m.url || m._id}', 'video')"><video poster="${thumbnailUrl || ''}" src="${optimizedVideoUrl}" preload="none" loading="lazy" playsinline webkit-playsinline style="width:100%; height:100%; object-fit:cover; cursor:pointer;"></video><div class="play-overlay"><div class="play-icon">▶</div></div></div>`;
                 }
