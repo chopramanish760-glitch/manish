@@ -3618,7 +3618,7 @@ async function submitFeedback(eventId, eventTitle){
                 </div>
             `;
             
-            // Update organizer feedback section if organizer is viewing messages for this event
+            // ALWAYS update organizer feedback section if organizer has messages modal open for this event
             if(currentUser && currentUser.role === 'ORGANIZER'){
                 try {
                     const eventRes = await fetch(API + '/events');
@@ -3627,13 +3627,17 @@ async function submitFeedback(eventId, eventTitle){
                     if(event && event.creatorRegNumber === currentUser.regNumber){
                         // Check if organizer is viewing messages modal for this event
                         const convList = document.getElementById('convList');
-                        if(convList && window.__convEventId === Number(eventId)){
-                            // Check if feedback tab is active, if so refresh it
+                        const modal = document.getElementById('modal');
+                        const isModalOpen = modal && modal.style.display === 'flex';
+                        if(convList && isModalOpen && window.__convEventId === Number(eventId)){
+                            // ALWAYS reload feedback list if feedback tab exists - wait a bit for backend to save
                             const feedbackTab = document.getElementById('tabFeedback');
-                            const isFeedbackTabActive = feedbackTab && feedbackTab.classList.contains('active');
-                            if(isFeedbackTabActive){
-                                // Reload feedback list immediately
-                                await loadOrganizerFeedbacks(Number(eventId));
+                            if(feedbackTab){
+                                setTimeout(async () => {
+                                    // Switch to feedback tab and reload
+                                    setConvTab('feedback');
+                                    await loadOrganizerFeedbacks(Number(eventId));
+                                }, 500);
                             }
                         }
                     }
@@ -4216,23 +4220,30 @@ function showLightbox(e,t){
         // Optimize Cloudinary video URL for faster streaming
         let optimizedVideoUrl = fullUrl;
         if (fullUrl && fullUrl.includes('cloudinary.com')) {
-            // Add streaming optimizations for faster playback
-            if (!fullUrl.includes('/q_')) {
-                // Add progressive streaming, auto quality, auto format
-                optimizedVideoUrl = fullUrl.replace(/\.(mp4|webm|ogg)/, '/q_auto,f_auto,vc_auto,ac_auto,fl_progressive.$1');
+            // Cloudinary video - use direct URL with minimal transformations for compatibility
+            // Don't modify the URL too much as it might break
+            if (!fullUrl.includes('/q_') && !fullUrl.includes('/f_')) {
+                // Only add quality if not already present - use proper Cloudinary URL format
+                optimizedVideoUrl = fullUrl.replace(/\/video\/upload\//, '/video/upload/q_auto,f_auto/');
+            } else {
+                optimizedVideoUrl = fullUrl;
             }
         }
+        
+        // Use multiple source formats for maximum compatibility
         mediaHtml = `
             <div style="position: relative; text-align: center;">
-                <video src="${optimizedVideoUrl}" 
+                <video 
                        controls 
                        preload="auto" 
                        playsinline 
-                       webkit-playsinline 
-                       style="max-width: 100%; max-height: 80vh; background: #000;">
-        <source src="${optimizedVideoUrl}" type="video/mp4">
-        <source src="${optimizedVideoUrl.replace(/\.mp4/, '.webm')}" type="video/webm">
-        Your browser does not support the video tag.
+                       webkit-playsinline
+                       style="max-width: 100%; max-height: 80vh; background: #000; width: 100%;">
+                    <source src="${optimizedVideoUrl}" type="video/mp4">
+                    <source src="${fullUrl}" type="video/mp4">
+                    <source src="${optimizedVideoUrl.replace(/\.mp4/, '.webm')}" type="video/webm">
+                    <source src="${fullUrl.replace(/\.mp4/, '.webm')}" type="video/webm">
+                    <p style="color: white; padding: 20px;">Your browser does not support the video tag. <a href="${fullUrl}" style="color: #3b82f6;">Download video</a></p>
                 </video>
             </div>
         `;
