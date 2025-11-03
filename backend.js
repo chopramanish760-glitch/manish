@@ -511,14 +511,11 @@ async function checkCompletedEventsForFeedback() {
             data.notifications[regNumber] = [];
           }
           
-          const notificationMsg = `📝 "${event.title}" has completed! Please share your feedback.`;
+          const notificationMsg = `📝 "${event.title}" has completed!`;
           data.notifications[regNumber].unshift({
             msg: notificationMsg,
             time: now.toISOString(),
-            read: false,
-            type: 'feedback',
-            eventId: event.id,
-            eventTitle: event.title
+            read: false
           });
           notificationCount++;
         }

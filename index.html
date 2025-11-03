@@ -2978,7 +2978,7 @@ async function showEventMediaModal(event) {
                         <div class="video-container" style="position: relative; cursor: pointer;" onclick="showLightbox('${media.url || media._id}', 'video')">
                             <img src="${thumbnailUrl || ''}" style="width:100%; height:120px; object-fit:cover; display:block; border-radius:8px; pointer-events:none;" onerror="this.style.display='none'">
                             <div class="play-overlay" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none;">
-                                <div class="play-icon">▶</div>
+                                <div class="play-icon" style="width:36px; height:36px; border-radius:50%; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; color:white; font-size:18px; border:2px solid rgba(255,255,255,0.8);">▶</div>
                             </div>
                         </div>
                     `;
@@ -3376,20 +3376,16 @@ async function renderNotifications(){
 }
 
 async function handleNotificationClick(notif){
-    if(notif && notif.type === 'feedback' && notif.eventId){
-        // Just mark as read - don't auto-open feedback form
-        // User can manually open feedback from notifications or event
-        try {
-            await fetch(`${API}/notifications/mark-read`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({regNumber: currentUser.regNumber, notificationId: notif.id})
-            });
-            renderNotifications();
-            pollNotifications();
-        } catch(err) {}
-        return;
-    }
+    // Just mark notification as read - no special handling needed
+    try {
+        await fetch(`${API}/notifications/mark-read`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({regNumber: currentUser.regNumber})
+        });
+        renderNotifications();
+        pollNotifications();
+    } catch(err) {}
     if(notif && notif.type === 'chat' && notif.eventId){
         try{
             const res = await fetch(API + '/events');
@@ -3586,11 +3582,54 @@ async function submitFeedback(eventId, eventTitle){
         const data = await res.json();
         
         if(res.ok && data.ok){
-            msgEl.textContent = '✅ Feedback submitted successfully!';
-            msgEl.style.color = '#10b981';
-            setTimeout(() => {
-                showFeedbackPopup(eventId, eventTitle);
-            }, 500);
+            // Immediately close form and show submitted feedback - block duplicate submissions
+            const f = data.feedback;
+            const body = document.getElementById('modal-body');
+            body.innerHTML = `
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                    <a class="map-back-arrow" onclick="closeModal()">←</a>
+                    <h3 style="margin:0;">📝 Feedback – ${escapeHtml(eventTitle||'Event')}</h3>
+                </div>
+                <div class="card">
+                    <div style="margin-bottom:16px; padding:12px; background:#1a3a1a; border-radius:8px; border:1px solid #10b981;">
+                        <p style="margin:0; color:#10b981;">✅ Your feedback has been submitted! You cannot submit feedback again.</p>
+                    </div>
+                    <div class="kv"><b>Event:</b> <span class="value">${escapeHtml(eventTitle||'Event')}</span></div>
+                    <div class="kv"><b>Seat Capacity Rating:</b> <span class="value">${f.seatCapacityRating}/3</span></div>
+                    ${f.overallRating ? `<div class="kv"><b>Overall Rating:</b> <span class="value">${f.overallRating}/5 ⭐</span></div>` : ''}
+                    ${f.organizationRating ? `<div class="kv"><b>Organization:</b> <span class="value">${capitalizeWords(f.organizationRating)}</span></div>` : ''}
+                    <div style="margin-top:12px;"><b>Your Review:</b></div>
+                    <div style="padding:12px; background:#1a1a1a; border-radius:8px; margin-top:8px; border:1px solid var(--border);">
+                        <p style="margin:0; white-space:pre-wrap; line-height:1.6;">${escapeHtml(f.review)}</p>
+                    </div>
+                    <div class="muted" style="margin-top:8px; font-size:0.85rem;">Submitted: ${new Date(f.submittedAt).toLocaleString()}</div>
+                    <p class="muted" style="margin-top:12px; font-size:0.9rem;">⚠️ Feedback cannot be changed or resubmitted after submission.</p>
+                </div>
+            `;
+            
+            // Update organizer feedback section if organizer is viewing messages for this event
+            if(currentUser && currentUser.role === 'ORGANIZER'){
+                try {
+                    const eventRes = await fetch(API + '/events');
+                    const eventData = await eventRes.json();
+                    const event = eventData.events.find(e => e.id === Number(eventId));
+                    if(event && event.creatorRegNumber === currentUser.regNumber){
+                        // Check if organizer is viewing messages modal for this event
+                        const convList = document.getElementById('convList');
+                        if(convList && window.__convEventId === Number(eventId)){
+                            // Check if feedback tab is active, if so refresh it
+                            const feedbackTab = document.getElementById('tabFeedback');
+                            const isFeedbackTabActive = feedbackTab && feedbackTab.classList.contains('active');
+                            if(isFeedbackTabActive){
+                                // Reload feedback list immediately
+                                await loadOrganizerFeedbacks(Number(eventId));
+                            }
+                        }
+                    }
+                } catch(err) {
+                    console.error('Error updating organizer feedback:', err);
+                }
+            }
         } else {
             msgEl.textContent = '❌ ' + (data.error || 'Failed to submit feedback');
             msgEl.style.color = '#ef4444';
@@ -3643,11 +3682,9 @@ async function pollNotifications(){
                 const latestNotification = unreadNotifications[0]; // Most recent first
                 
                 // Show ticker with notification message or count
-                let tickerMessage = '';
-                if (latestNotification && latestNotification.type === 'feedback') {
-                    tickerMessage = `📝 ${latestNotification.msg || 'Event completed! Please share feedback.'}`;
-                } else {
-                    tickerMessage = `🔔 You have ${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}! Click to view.`;
+                let tickerMessage = `🔔 You have ${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}! Click to view.`;
+                if (latestNotification && latestNotification.msg) {
+                    tickerMessage = latestNotification.msg;
                 }
                 tickerTextEl.textContent = tickerMessage;
                 
@@ -5202,9 +5239,20 @@ async function renderAdminEvents(){
     const r=await fetch(API+'/admin/events'); 
     const d=await r.json(); 
     let list=d.events||[];
-    const today = new Date().toISOString().slice(0,10);
-    const isPast = (e)=> String(e.date) < today;
-    const isUpcoming = (e)=> String(e.date) >= today;
+    const now = new Date();
+    // Properly check if event has ended by considering date, time, and duration
+    const isPast = (e) => {
+        const startTime = parseEventDateTime(e.date, e.time);
+        const duration = e.duration || 0;
+        const endTime = new Date(startTime.getTime() + duration * 60000);
+        return endTime < now; // Event has ended
+    };
+    const isUpcoming = (e) => {
+        const startTime = parseEventDateTime(e.date, e.time);
+        const duration = e.duration || 0;
+        const endTime = new Date(startTime.getTime() + duration * 60000);
+        return endTime >= now; // Event hasn't ended yet
+    };
     list = list.filter(e => __adminEventsFilter==='past' ? isPast(e) : isUpcoming(e));
     
     pane.innerHTML = `<h3>Events Management</h3>
