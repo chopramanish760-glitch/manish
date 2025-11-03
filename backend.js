@@ -2744,19 +2744,30 @@ app.post('/api/account/delete', async (req, res) => {
 
 // ---------- Event Feedback System ----------
 // Submit feedback for a completed event
-// Body: { eventId, regNumber, seatCapacityRating, review }
+// Body: { eventId, regNumber, seatCapacityRating, overallRating, organizationRating, review }
 app.post('/api/feedback', async (req, res) => {
   try {
     const data = await loadData();
-    const { eventId, regNumber, seatCapacityRating, review } = req.body;
+    const { eventId, regNumber, seatCapacityRating, overallRating, organizationRating, review } = req.body;
     
-    if (!eventId || !regNumber || seatCapacityRating === undefined || !review) {
+    if (!eventId || !regNumber || seatCapacityRating === undefined || !overallRating || !organizationRating || !review) {
       return res.status(400).json({ ok: false, error: 'All fields are required.' });
     }
     
     // Validate seatCapacityRating (should be 2 or 3)
     if (seatCapacityRating !== 2 && seatCapacityRating !== 3) {
       return res.status(400).json({ ok: false, error: 'Seat capacity rating must be 2 or 3.' });
+    }
+    
+    // Validate overallRating (should be 1-5)
+    if (!overallRating || overallRating < 1 || overallRating > 5) {
+      return res.status(400).json({ ok: false, error: 'Overall rating must be between 1 and 5.' });
+    }
+    
+    // Validate organizationRating
+    const validOrgRatings = ['poor', 'fair', 'good', 'excellent'];
+    if (!organizationRating || !validOrgRatings.includes(organizationRating)) {
+      return res.status(400).json({ ok: false, error: 'Organization rating must be one of: poor, fair, good, excellent.' });
     }
     
     // Check if event exists and user was booked
@@ -2784,6 +2795,8 @@ app.post('/api/feedback', async (req, res) => {
       eventId: Number(eventId),
       regNumber,
       seatCapacityRating: Number(seatCapacityRating),
+      overallRating: Number(overallRating),
+      organizationRating: String(organizationRating),
       review: String(review).trim(),
       submittedAt: new Date().toISOString()
     };
