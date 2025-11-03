@@ -1037,19 +1037,22 @@ async function renderMedia() {
                     mediaUrl = m.url.startsWith('/') ? `${API_BASE}${m.url}` : `${API_BASE}/${m.url}`;
                 }
                 if (m.type === "photo") {
-                    // Use thumbnail URL if available, otherwise use optimized image URL
-                    let imgUrl = m.thumbnailUrl || mediaUrl;
-                    if (!imgUrl || !imgUrl.includes('cloudinary.com')) {
-                        // Fallback: generate thumbnail URL
-                        if (mediaUrl && mediaUrl.includes('cloudinary.com')) {
-                            if (!mediaUrl.includes('/q_') && !mediaUrl.includes('/f_')) {
-                                imgUrl = mediaUrl.replace(/(\/v\d+\/)(.+)/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2');
-                            } else {
-                                imgUrl = mediaUrl;
-                            }
-                        } else {
-                            imgUrl = mediaUrl;
+                    // ALWAYS use thumbnail URL from backend if available
+                    let imgUrl = m.thumbnailUrl;
+                    
+                    // If no thumbnail URL, generate one from media URL
+                    if (!imgUrl && mediaUrl && mediaUrl.includes('cloudinary.com')) {
+                        // Generate thumbnail URL by inserting transformations
+                        imgUrl = mediaUrl.replace(/\/(image\/upload\/v\d+\/)(.+)$/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2');
+                        // Fallback if that didn't work
+                        if (imgUrl === mediaUrl) {
+                            imgUrl = mediaUrl.replace(/\/(upload\/v\d+\/)(.+)$/, '$1w_400,h_300,c_fill,q_auto,f_auto/$2');
                         }
+                    }
+                    
+                    // Final fallback to full image if thumbnail generation failed
+                    if (!imgUrl) {
+                        imgUrl = mediaUrl;
                     }
                     sectionHtml += `<div class="media-item"><img loading="lazy" decoding="async" src="${imgUrl}" onclick="showLightbox('${m.url || m._id}', 'photo')" style="width:100%; height:120px; object-fit:cover; cursor:pointer;" onerror="this.src='${mediaUrl}'"></div>`;
                 }
@@ -3375,19 +3378,20 @@ async function pollNotifications(){
             const unreadCount = data.notifications.filter(n => !n.read).length;
             
             if(unreadCount > 0 && !bannerActive) {
-                // Show ticker with unread count
+                // Show ticker with unread count - keep active until no unread notifications
                 tickerTextEl.textContent = `🔔 You have ${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}! Click to view.`;
                 
-                // Only show if not on notifications screen
-                if(!isNotificationsScreenActive) {
+                // Only hide if on notifications screen, otherwise keep showing
+                if(isNotificationsScreenActive) {
+                    // Hide only when viewing notifications screen
+                    ticker.style.display = "none";
+                } else {
+                    // Show ticker when there are unread notifications
                     ticker.style.display = "block";
                     tickerTextEl.style.animationPlayState = 'running';
-                } else {
-                    // Hide if on notifications screen
-                    ticker.style.display = "none";
                 }
             } else {
-                // No unread notifications
+                // No unread notifications - hide ticker
                 if(!bannerActive) {
                     ticker.style.display = "none";
                     tickerTextEl.style.animationPlayState = 'paused';

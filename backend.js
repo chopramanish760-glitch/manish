@@ -294,9 +294,9 @@ async function initializeApp() {
   // Start checking for event live notifications every minute
   setInterval(checkEventLiveNotifications, 60000);
   
-  // Start checking for completed events to send feedback notifications every 10 seconds for precision
-  // This ensures notifications are sent within ~1 minute of event ending (checks every 10s, sends at 1-3 min window)
-  setInterval(checkCompletedEventsForFeedback, 10000);
+  // Start checking for completed events to send feedback notifications every 5 seconds for instant delivery
+  // This ensures notifications are sent immediately after event ends (checks every 5s, sends at 0-60s window)
+  setInterval(checkCompletedEventsForFeedback, 5000);
 }
 
 // Internal Keep-Alive Mechanism - Prevents backend from sleeping
@@ -483,10 +483,10 @@ async function checkCompletedEventsForFeedback() {
       // Check if event has completed (end time is in the past)
       const timeSinceEnd = now.getTime() - eventEnd.getTime();
       
-      // Send notifications instantly after event ends (window: 0-30 seconds for immediate delivery)
-      const immediateWindow = 30 * 1000; // 30 seconds
+      // Send notifications instantly after event ends (window: 0-60 seconds for reliable delivery)
+      const immediateWindow = 60 * 1000; // 60 seconds (1 minute)
       
-      // Send notification if event ended within the last 30 seconds (instant delivery)
+      // Send notification if event ended within the last 60 seconds (instant delivery)
       if (timeSinceEnd > 0 && timeSinceEnd <= immediateWindow) {
         // Send feedback request notifications to all booked users
         let notificationCount = 0;
@@ -541,7 +541,7 @@ async function checkCompletedEventsForFeedback() {
         
         console.log(`✅ 📝 Sent feedback request notifications to ${notificationCount} booked users for completed event: "${event.title}" (ended ${Math.round(timeSinceEnd / 60000)} min ${Math.round((timeSinceEnd % 60000) / 1000)} sec ago)`);
       } else if (timeSinceEnd > immediateWindow && timeSinceEnd <= 5 * 60 * 1000) {
-        // Log if we missed the window (event ended more than 30 seconds ago but notification not sent)
+        // Log if we missed the window (event ended more than 60 seconds ago but notification not sent)
         const secondsAgo = Math.round(timeSinceEnd / 1000);
         if (secondsAgo % 30 === 0) { // Log every 30 seconds to avoid spam
           console.warn(`⚠️ Event "${event.title}" ended ${secondsAgo} seconds ago but notification window missed. Check if already notified.`);
@@ -2184,43 +2184,22 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
       }
     };
 
-    // Optimize upload settings for faster uploads
+    // Optimize upload settings - use simpler approach for reliability
     if (resourceType === 'video') {
-      // Make thumbnail synchronous (fast), but keep other optimizations
-      uploadOptions.eager_async = false; // Make thumbnail synchronous so it's ready immediately
-      uploadOptions.eager = [
-        // Thumbnail for preview (synchronous - must be ready immediately)
-        {
-          format: 'jpg',
-          transformation: [{ width: 400, height: 300, crop: 'fill', quality: 'auto' }]
-        },
-        // Optimized video for playback (synchronous for immediate playback)
-        {
-          quality: 'auto',
-          format: 'mp4',
-          video_codec: 'h264',
-          audio_codec: 'aac',
-          bit_rate: '1m', // Moderate bitrate for faster processing
-          transformation: [{ width: 1280, height: 720, crop: 'limit' }]
-        }
-      ];
-      // Optimize video settings
+      // Video settings - don't use eager transformations, generate URLs dynamically
       uploadOptions.quality = 'auto';
       uploadOptions.format = 'mp4';
+      uploadOptions.video_codec = 'h264';
+      uploadOptions.audio_codec = 'aac';
       uploadOptions.chunk_size = 6000000; // 6MB chunks
       uploadOptions.timeout = 180000; // 3 minute timeout for large videos
+      // No eager transformations - generate URLs from base URL
     } else {
-      // For images, generate thumbnail synchronously
+      // For images - simple settings, generate thumbnails from URL
       uploadOptions.quality = 'auto:good';
       uploadOptions.fetch_format = 'auto';
-      uploadOptions.eager = [
-        // Thumbnail for images (synchronous)
-        {
-          transformation: [{ width: 400, height: 300, crop: 'fill', quality: 'auto' }]
-        }
-      ];
-      uploadOptions.eager_async = false;
       uploadOptions.timeout = 60000; // 1 minute timeout for images
+      // No eager transformations - generate thumbnails from base URL
     }
 
     // Upload to Cloudinary - use stream upload for all files (faster than base64)
@@ -2242,47 +2221,44 @@ app.post("/api/media", upload.single("file"), async (req, res) => {
     
     console.log(`✅ File uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
     
-    // Use eager transformation URL if available (synchronous eager means they're ready)
+    // Generate URLs - always generate thumbnails from base URL (more reliable)
     let mediaUrl = cloudinaryResult.secure_url;
     let thumbnailUrl = null;
     
-    // Handle eager transformations (synchronous, so they're ready immediately)
-    if (type === 'video' && cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
-      // Eager transformations: [0] = thumbnail (jpg), [1] = optimized video (mp4)
-      const thumbnailTransformation = cloudinaryResult.eager.find(e => e.format === 'jpg');
-      const optimizedVideoTransformation = cloudinaryResult.eager.find(e => e.format === 'mp4');
+    // Generate thumbnail URL from base URL (always works, doesn't depend on eager transformations)
+    const baseUrl = cloudinaryResult.secure_url;
+    const version = cloudinaryResult.version || '1';
+    
+    // Get cloud name from config for URL generation
+    const cloudName = cloudinary.config().cloud_name || 'dazcrwazd';
+    
+    if (type === 'video') {
+      // Video thumbnail: Use Cloudinary URL helper to generate thumbnail
+      // Format: res.cloudinary.com/{cloud}/video/upload/{transforms}/{public_id}.jpg
+      const publicId = cloudinaryResult.public_id;
+      thumbnailUrl = cloudinary.url(publicId, {
+        resource_type: 'video',
+        transformation: [
+          { width: 400, height: 300, crop: 'fill', quality: 'auto' },
+          { format: 'jpg' }
+        ],
+        secure: true
+      });
       
-      if (thumbnailTransformation) {
-        thumbnailUrl = thumbnailTransformation.secure_url;
-      }
-      
-      // Use optimized video URL if available, otherwise use original
-      if (optimizedVideoTransformation) {
-        mediaUrl = optimizedVideoTransformation.secure_url;
-      } else {
-        // Fallback: use original URL with streaming profile
-        mediaUrl = cloudinaryResult.secure_url.replace(/\/(upload|v\d+)\//, '/$1/sp_auto/');
-      }
+      // Video URL: Use original secure_url for playback
+      mediaUrl = baseUrl;
     } else if (type === 'photo') {
-      // For images, use eager thumbnail if available
-      if (cloudinaryResult.eager && cloudinaryResult.eager.length > 0) {
-        const thumbnailTransformation = cloudinaryResult.eager.find(e => e.transformation && e.transformation[0] && e.transformation[0].crop === 'fill');
-        if (thumbnailTransformation && thumbnailTransformation.secure_url) {
-          thumbnailUrl = thumbnailTransformation.secure_url;
-        }
-      }
+      // Image thumbnail: Use Cloudinary URL helper to generate thumbnail
+      const publicId = cloudinaryResult.public_id;
+      thumbnailUrl = cloudinary.url(publicId, {
+        transformation: [
+          { width: 400, height: 300, crop: 'fill', quality: 'auto', fetch_format: 'auto' }
+        ],
+        secure: true
+      });
       
-      // Fallback: generate thumbnail URL from original
-      if (!thumbnailUrl) {
-        const thumbnailParts = cloudinaryResult.secure_url.split('/');
-        const versionIndex = thumbnailParts.findIndex(p => p.startsWith('v'));
-        if (versionIndex >= 0) {
-          thumbnailUrl = cloudinaryResult.secure_url.replace(
-            /\/v\d+\//,
-            `/v${cloudinaryResult.version}/w_400,h_300,c_fill,q_auto,f_auto/`
-          );
-        }
-      }
+      // Full-size image URL
+      mediaUrl = baseUrl;
     }
     
     const media = { 
