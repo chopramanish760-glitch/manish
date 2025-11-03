@@ -294,9 +294,9 @@ async function initializeApp() {
   // Start checking for event live notifications every minute
   setInterval(checkEventLiveNotifications, 60000);
   
-  // Start checking for completed events to send feedback notifications every 5 seconds for instant delivery
-  // This ensures notifications are sent immediately after event ends (checks every 5s, sends at 0-60s window)
-  setInterval(checkCompletedEventsForFeedback, 5000);
+  // Start checking for completed events to send feedback notifications every 2 seconds for instant delivery
+  // This ensures notifications are sent immediately after event ends (checks every 2s, sends at 0-10s window)
+  setInterval(checkCompletedEventsForFeedback, 2000);
 }
 
 // Internal Keep-Alive Mechanism - Prevents backend from sleeping
@@ -483,10 +483,10 @@ async function checkCompletedEventsForFeedback() {
       // Check if event has completed (end time is in the past)
       const timeSinceEnd = now.getTime() - eventEnd.getTime();
       
-      // Send notifications instantly after event ends (window: 0-60 seconds for reliable delivery)
-      const immediateWindow = 60 * 1000; // 60 seconds (1 minute)
+      // Send notifications instantly after event ends (window: 0-10 seconds for reliable delivery)
+      const immediateWindow = 10 * 1000; // 10 seconds
       
-      // Send notification if event ended within the last 60 seconds (instant delivery)
+      // Send notification if event ended within the last 10 seconds (instant delivery)
       if (timeSinceEnd > 0 && timeSinceEnd <= immediateWindow) {
         // Send feedback request notifications to all booked users
         let notificationCount = 0;
