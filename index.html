@@ -433,7 +433,10 @@ function checkSavedLogin() {
         renderTickets(true);
         pollNotifications();
         notificationInterval = setInterval(pollNotifications, 3000); // Poll every 3 seconds for faster feedback notification delivery
-        eventStateInterval = setInterval(checkEventStates, 30000);
+        // Initialize live event tracking
+        lastLiveEventIds = new Set();
+        
+        eventStateInterval = setInterval(checkEventStates, 10000); // Check every 10 seconds for live event transitions
         // Start event start notifications checker
         setInterval(checkEventStartNotifications, 60000); // Check every minute
         // Show welcome back banner
@@ -1516,7 +1519,9 @@ async function doLogin() {
                 }
                 pollNotifications();
                 notificationInterval = setInterval(pollNotifications, 3000); // Poll every 3 seconds for faster feedback notification delivery
-                eventStateInterval = setInterval(checkEventStates, 30000);
+                // Initialize live event tracking
+                lastLiveEventIds = new Set();
+                eventStateInterval = setInterval(checkEventStates, 10000); // Check every 10 seconds for live event transitions
                 // Start event start notifications checker
                 setInterval(checkEventStartNotifications, 60000); // Check every minute
                 // Start live updates stream
@@ -1796,7 +1801,9 @@ async function doSignup() {
                         await renderTickets(true);
                         pollNotifications();
                         notificationInterval = setInterval(pollNotifications, 3000); // Poll every 3 seconds for faster feedback notification delivery
-                        eventStateInterval = setInterval(checkEventStates, 30000);
+                        // Initialize live event tracking
+                        lastLiveEventIds = new Set();
+                        eventStateInterval = setInterval(checkEventStates, 10000); // Check every 10 seconds for live event transitions
                         // Start event start notifications checker
                         setInterval(checkEventStartNotifications, 60000); // Check every minute
                         renderTabs();
@@ -2987,7 +2994,76 @@ async function uploadMediaForEvent(eventId, file) {
 }
 
 // ---------- Notifications & Misc Helpers ----------
-async function checkEventStates(){if(!currentUser)return;const res=await fetch(API+"/events");const data=await res.json();if(!data.ok)return;const eventDate=new Date;const upcomingCount=data.events.filter(e=>{const endTime=new Date(parseEventDateTime(e.date,e.time).getTime()+(e.duration||0)*6e4);return endTime>=eventDate}).length;if(-1===lastUpcomingCount)lastUpcomingCount=upcomingCount;else if(upcomingCount<lastUpcomingCount){lastUpcomingCount=upcomingCount;const currentScreen=document.querySelector('.content[style*="block"]').id.replace("screen-","");"home"===currentScreen&&renderEvents(),"media"===currentScreen&&renderMedia()}}
+// Track which events are currently live to detect transitions
+let lastLiveEventIds = new Set();
+
+async function checkEventStates(){
+    if(!currentUser) return;
+    
+    try {
+        const res = await fetch(API + "/events");
+        const data = await res.json();
+        if(!data.ok) return;
+        
+        const now = new Date();
+        
+        // Track current live event IDs
+        const currentLiveEventIds = new Set();
+        
+        // Check for events that just became live or ended
+        let eventsChanged = false;
+        
+        data.events.forEach(e => {
+            const startTime = parseEventDateTime(e.date, e.time);
+            const duration = e.duration || 0;
+            const endTime = new Date(startTime.getTime() + duration * 60000);
+            
+            const isLive = now >= startTime && now < endTime;
+            const wasLive = lastLiveEventIds.has(e.id);
+            
+            if(isLive) {
+                currentLiveEventIds.add(e.id);
+                // If event just became live (wasn't live before), trigger refresh
+                if(!wasLive) {
+                    eventsChanged = true;
+                }
+            } else if(wasLive && !isLive) {
+                // Event was live but now ended, trigger refresh
+                eventsChanged = true;
+            }
+        });
+        
+        // Also check for count changes (events moving to past)
+        const upcomingCount = data.events.filter(e => {
+            const startTime = parseEventDateTime(e.date, e.time);
+            const duration = e.duration || 0;
+            const endTime = new Date(startTime.getTime() + duration * 60000);
+            return endTime >= now;
+        }).length;
+        
+        if(lastUpcomingCount === -1) {
+            lastUpcomingCount = upcomingCount;
+        } else if(upcomingCount < lastUpcomingCount) {
+            eventsChanged = true; // Event moved to past
+            lastUpcomingCount = upcomingCount;
+        }
+        
+        // Update lastLiveEventIds
+        lastLiveEventIds = currentLiveEventIds;
+        
+        // Refresh UI if events changed (became live, ended, or moved to past)
+        if(eventsChanged) {
+            const currentScreen = document.querySelector('.content[style*="block"]')?.id?.replace("screen-", "");
+            if(currentScreen === "home") {
+                renderEvents();
+            } else if(currentScreen === "media") {
+                renderMedia();
+            }
+        }
+    } catch(err) {
+        console.warn('Error checking event states:', err);
+    }
+}
 
 // Event start notifications with time gaps (15, 20, 20, 5 minutes) and live notifications
 async function checkEventStartNotifications() {
@@ -3268,7 +3344,67 @@ async function submitFeedback(eventId, eventTitle){
 }
 
 async function markAllAsRead(){await fetch(API+"/notifications/mark-read",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({regNumber:currentUser.regNumber})}),renderNotifications(),pollNotifications()}
-async function pollNotifications(){if(!currentUser)return;try{try{const u=await fetch(API+"/users/"+currentUser.regNumber);if(u.status===404){alert('Your account has been deleted. Logging out.');logout();return;}}catch(_){}const e=await fetch(API+"/notifications/"+currentUser.regNumber),t=await e.json();const n=document.getElementById("notificationTicker");const tickerTextEl=document.getElementById("notificationTickerText");const pollTime=Date.now();const bannerActive=pollTime<welcomeBannerUntil;if(t.ok&&t.notifications.length>0){const r=t.notifications.filter(e=>!e.read).length;if(r>0&&!bannerActive){tickerTextEl.textContent=`🔔 You have ${r} unread notification(s)! Click to view.`;if(document.getElementById("screen-notifications").style.display!=="block"){n.style.display="block";tickerTextEl.style.animationPlayState='running';}}else if(!bannerActive){n.style.display="none";tickerTextEl.style.animationPlayState='paused';tickerTextEl.style.transform='translateX(0)';}}else if(!bannerActive){n.style.display="none"}}catch(e){}}
+async function pollNotifications(){
+    if(!currentUser) return;
+    
+    try {
+        // Check if user still exists
+        try {
+            const userCheck = await fetch(API + "/users/" + currentUser.regNumber);
+            if(userCheck.status === 404) {
+                alert('Your account has been deleted. Logging out.');
+                logout();
+                return;
+            }
+        } catch(_) {}
+        
+        // Fetch notifications
+        const res = await fetch(API + "/notifications/" + currentUser.regNumber);
+        const data = await res.json();
+        
+        const ticker = document.getElementById("notificationTicker");
+        const tickerTextEl = document.getElementById("notificationTickerText");
+        
+        if(!ticker || !tickerTextEl) return;
+        
+        const pollTime = Date.now();
+        const bannerActive = pollTime < welcomeBannerUntil;
+        const notificationsScreen = document.getElementById("screen-notifications");
+        const isNotificationsScreenActive = notificationsScreen && notificationsScreen.style.display === "block";
+        
+        if(data.ok && data.notifications && data.notifications.length > 0) {
+            const unreadCount = data.notifications.filter(n => !n.read).length;
+            
+            if(unreadCount > 0 && !bannerActive) {
+                // Show ticker with unread count
+                tickerTextEl.textContent = `🔔 You have ${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}! Click to view.`;
+                
+                // Only show if not on notifications screen
+                if(!isNotificationsScreenActive) {
+                    ticker.style.display = "block";
+                    tickerTextEl.style.animationPlayState = 'running';
+                } else {
+                    // Hide if on notifications screen
+                    ticker.style.display = "none";
+                }
+            } else {
+                // No unread notifications
+                if(!bannerActive) {
+                    ticker.style.display = "none";
+                    tickerTextEl.style.animationPlayState = 'paused';
+                    tickerTextEl.style.transform = 'translateX(0)';
+                }
+            }
+        } else {
+            // No notifications
+            if(!bannerActive) {
+                ticker.style.display = "none";
+            }
+        }
+    } catch(err) {
+        console.warn('Error polling notifications:', err);
+    }
+}
 function parseEventDateTime(e,t){if(!t)return new Date(e);if(/am|pm/i.test(t)){let[n,a]=t.split(" ");let[i,o]=n.split(":").map(Number);"PM"===a.toUpperCase()&&i<12&&(i+=12),"AM"===a.toUpperCase()&&12===i&&(i=0);return new Date(`${e}T${String(i).padStart(2,"0")}:${o.toString().padStart(2,"0")}:00`)}return new Date(`${e}T${t}:00`)}
 async function showEventBookings(e){
     const t=await fetch(API+"/events");
@@ -5399,7 +5535,7 @@ function initializeApp() {
             // Start background processes
             try { pollNotifications(); } catch {}
             try { notificationInterval = setInterval(pollNotifications, 3000); } catch {} // Poll every 3 seconds for faster feedback notification delivery
-            try { eventStateInterval = setInterval(checkEventStates, 30000); } catch {}
+            try { lastLiveEventIds = new Set(); eventStateInterval = setInterval(checkEventStates, 10000); } catch {} // Initialize live tracking and check every 10 seconds
             try { startLiveUpdates(); } catch {}
         } else {
             console.log("🔐 No saved session, showing login");
